@@ -14,14 +14,18 @@ typedef std::function<void(String, String)> CommandCallback;
 class KratisNetworkManager {
 public:
     KratisNetworkManager(const char* serverUrl, const char* deviceId);
-    ~KratisNetworkManager(); // Деструктор для очищення пам'яті
+    ~KratisNetworkManager();
+
+    // Налаштування назви точки доступу (викликати в setup)
+    void setApCredentials(const char* ssid, const char* password);
+    void setDeviceType(const char* type);
 
     void begin();
     void handle(); 
-    
     void updateSensorData(float temp, float hum);
 
-    void startApMode();
+    // Тепер можна передати аргументи, або використати збережені через setApCredentials
+    void startApMode(const char* ssid = nullptr, const char* password = nullptr);
     void factoryReset();
     
     bool isConnected();
@@ -34,9 +38,14 @@ public:
 private:
     const char* _serverUrl;
     const char* _deviceId;
+    String _deviceType = "unknown";
+    
+    // Налаштування для AP Mode
+    String _apSsid = "Kratis-Setup";
+    String _apPass = "12345678";
     
     WiFiMulti _wifiMulti;
-    WebServer* _server; // ВКАЗІВНИК! Вирішує проблему з копіюванням
+    WebServer* _server; 
     Preferences _preferences;
 
     bool _isApMode = false;
