@@ -1,6 +1,6 @@
 #include "KratisNetworkManager.h"
 
-// Додамо макрос для логування всередині класу
+// Макроси логування
 #define LOG_NM(x) Serial.println("[NET] " + String(x))
 #define LOGF_NM(format, ...) Serial.printf("[NET] " format, __VA_ARGS__)
 
@@ -25,10 +25,10 @@ void KratisNetworkManager::setDeviceType(const char* type) {
 
 void KratisNetworkManager::begin() {
     LOG_NM("Starting...");
-    _preferences.begin("config", true); // Відкриваємо тільки для читання
+    _preferences.begin("config", true); 
     _ownerId = _preferences.getString("owner", "");
     int count = _preferences.getInt("wifi_count", 0);
-    _preferences.end(); // Обов'язково закриваємо
+    _preferences.end(); 
 
     LOGF_NM("Saved Networks: %d\n", count);
 
@@ -46,8 +46,9 @@ void KratisNetworkManager::begin() {
         
         LOG_NM("STA Mode started. Waiting for connection...");
     }
-
-    _lastLocalActivity = millis() - LOCAL_TIMEOUT - 1000;
+    
+    _lastLocalActivity = millis();
+    _lastPollTime = millis();
 }
 
 void KratisNetworkManager::loadNetworks() {
@@ -83,7 +84,6 @@ void KratisNetworkManager::handle() {
         return;
     }
 
-    // WiFiMulti.run() повертає статус підключення
     uint8_t status = _wifiMulti.run();
 
     if (status == WL_CONNECTED) {
@@ -93,34 +93,26 @@ void KratisNetworkManager::handle() {
             LOGF_NM("WiFi Connected! IP: %s\n", WiFi.localIP().toString().c_str());
             pollCloudServer();
         }
+        
+        // ЗАВЖДИ слухаємо локальні запити
         _server->handleClient();
+
+        // ЗАВЖДИ (з інтервалом) слухаємо хмару
+        if (millis() - _lastPollTime > CLOUD_POLL_INTERVAL) {
+            _lastPollTime = millis();
+            pollCloudServer();
+            _cloudModeActive = true; 
+        }
     } else {
         if (_isServerStarted) {
             LOG_NM("WiFi Lost!");
             _isServerStarted = false;
         }
     }
-
-    if (WiFi.status() == WL_CONNECTED) {
-        if (millis() - _lastLocalActivity > LOCAL_TIMEOUT) {
-            if (!_cloudModeActive) {
-                _cloudModeActive = true;
-                LOG_NM("Switched to CLOUD MODE (Local timeout)");
-            }
-            if (millis() - _lastPollTime > CLOUD_POLL_INTERVAL) {
-                _lastPollTime = millis();
-                pollCloudServer();
-            }
-        }
-    }
 }
 
 void KratisNetworkManager::handleLocalRequest() {
-    if (_cloudModeActive) {
-        LOG_NM("Switched to LAN MODE (Request received)");
-    }
     _lastLocalActivity = millis();
-    _cloudModeActive = false;
 
     if (_server->hasArg("val") && _onCommand) {
         _onCommand(_server->arg("val"), "LAN");
@@ -143,7 +135,7 @@ void KratisNetworkManager::pollCloudServer() {
     if (WiFi.status() != WL_CONNECTED) return;
     
     HTTPClient http;
-    http.setTimeout(3000);
+    http.setTimeout(2000); 
     String url = String(_serverUrl) + "/api/sync";
     
     JsonDocument doc;
@@ -168,10 +160,10 @@ void KratisNetworkManager::pollCloudServer() {
         DeserializationError error = deserializeJson(respDoc, resp);
         
         if (!error && !respDoc["cmd"].isNull() && _onCommand) {
-            _onCommand(respDoc["cmd"].as<String>(), "CLOUD");
+            String cmd = respDoc["cmd"].as<String>();
+            _onCommand(cmd, "CLOUD");
+            LOGF_NM("Executed Cloud Command: %s\n", cmd.c_str());
         }
-    } else {
-        LOGF_NM("Cloud Error: %d\n", code);
     }
     http.end();
 }
@@ -207,6 +199,7 @@ void KratisNetworkManager::startApMode(const char* ssid, const char* password) {
 void KratisNetworkManager::handleSaveConfig() {
     if (_server->hasArg("plain")) {
         String body = _server->arg("plain");
+        LOG_NM("Config Received: " + body);
         JsonDocument doc;
         DeserializationError error = deserializeJson(doc, body);
         
@@ -231,17 +224,13 @@ void KratisNetworkManager::handleSaveConfig() {
                 }
                 
                 _preferences.end();
-
-                // ВАЖЛИВО: Повертаємо реальний device_id телефону!
+                
                 JsonDocument respDoc;
                 respDoc["status"] = "saved";
-                respDoc["device_id"] = _deviceId; // Це ID з MAC-адреси
-                
-                String respStr;
-                serializeJson(respDoc, respStr);
+                respDoc["device_id"] = _deviceId;
+                String respStr; serializeJson(respDoc, respStr);
 
                 _server->send(200, "application/json", respStr);
-                
                 delay(1000);
                 ESP.restart();
                 return;
@@ -251,21 +240,14 @@ void KratisNetworkManager::handleSaveConfig() {
     _server->send(400, "application/json", "{\"status\":\"error\"}");
 }
 
-// ВИПРАВЛЕНО: Надійне скидання
 void KratisNetworkManager::factoryReset() {
     LOG_NM("FACTORY RESET executing...");
-    _preferences.begin("config", false); // Відкриваємо для запису
-    
-    // 1. Явно видаляємо лічильник мереж
+    _preferences.begin("config", false); 
     _preferences.remove("wifi_count"); 
-    
-    // 2. На всяк випадок чистимо все
     _preferences.clear();
-    
-    _preferences.end(); // Закриваємо і комітимо зміни
-    
+    _preferences.end();
     LOG_NM("Memory cleared. Restarting in 2s...");
-    delay(2000); // Даємо більше часу флеш-пам'яті
+    delay(2000); 
     ESP.restart();
 }
 

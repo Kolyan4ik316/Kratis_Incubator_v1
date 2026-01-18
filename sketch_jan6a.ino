@@ -19,8 +19,7 @@
 const char* SERVER_URL = "https://kratis-p2p-server.onrender.com"; 
 const char* DEVICE_TYPE = "incubator_v1";
 
-// Буфер для динамічного ID
-char uniqueDeviceId[32];
+char uniqueDeviceId[32]; // Буфер для ID
 
 const char* AP_SSID = "Kratis-Incubator-01";
 const char* AP_PASS = "12345678";
@@ -34,8 +33,7 @@ const char* AP_PASS = "12345678";
 DHT dht(DHTPIN, DHTTYPE);
 U8G2_SSD1306_72X40_ER_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
-// Вказівник на менеджер (ініціалізуємо в setup)
-KratisNetworkManager* network = nullptr;
+KratisNetworkManager* network = nullptr; // Вказівник
 
 unsigned long lastSensorRead = 0;
 unsigned long buttonPressStart = 0;
@@ -112,7 +110,6 @@ void checkHardwareButton() {
     }
 }
 
-// Генерація унікального ID з MAC-адреси
 void generateDeviceId() {
     uint64_t mac = ESP.getEfuseMac();
     snprintf(uniqueDeviceId, sizeof(uniqueDeviceId), "esp32_%04X%08X", 
@@ -125,7 +122,6 @@ void setup() {
     delay(1000); 
     LOG("\n--- SYSTEM BOOT ---");
     
-    // 1. Генерація ID
     generateDeviceId();
 
     LOG("Init I2C...");
@@ -139,8 +135,6 @@ void setup() {
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x10_tf);
     u8g2.drawStr(0, 10, "System Init...");
-    
-    // Покажемо ID на екрані при старті (корисно)
     u8g2.setCursor(0, 30);
     u8g2.print("ID: ");
     u8g2.print(uniqueDeviceId);
@@ -148,8 +142,6 @@ void setup() {
     delay(2000);
 
     LOG("Configuring Network Manager...");
-    
-    // 2. Створюємо менеджер з унікальним ID
     network = new KratisNetworkManager(SERVER_URL, uniqueDeviceId);
     
     network->setDeviceType(DEVICE_TYPE);
@@ -163,7 +155,7 @@ void setup() {
 
 void loop() {
     checkHardwareButton();
-    if(network) network->handle(); // Перевірка на nullptr
+    if(network) network->handle();
 
     if (millis() - lastSensorRead > 2000) {
         lastSensorRead = millis();

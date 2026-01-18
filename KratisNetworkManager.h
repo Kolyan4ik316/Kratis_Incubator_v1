@@ -16,7 +16,7 @@ public:
     KratisNetworkManager(const char* serverUrl, const char* deviceId);
     ~KratisNetworkManager();
 
-    // Налаштування назви точки доступу (викликати в setup)
+    // Налаштування назви точки доступу
     void setApCredentials(const char* ssid, const char* password);
     void setDeviceType(const char* type);
 
@@ -24,7 +24,7 @@ public:
     void handle(); 
     void updateSensorData(float temp, float hum);
 
-    // Тепер можна передати аргументи, або використати збережені через setApCredentials
+    // Тепер можна передати аргументи або використати збережені
     void startApMode(const char* ssid = nullptr, const char* password = nullptr);
     void factoryReset();
     
@@ -40,7 +40,6 @@ private:
     const char* _deviceId;
     String _deviceType = "unknown";
     
-    // Налаштування для AP Mode
     String _apSsid = "Kratis-Setup";
     String _apPass = "12345678";
     
