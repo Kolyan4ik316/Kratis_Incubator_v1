@@ -50,8 +50,7 @@ String lastCmd = "Start";
 // --- ЗМІННІ ДЛЯ ПЛАВНОГО РУХУ ---
 int currentServoAngle = 0; // Поточний реальний кут
 int targetServoAngle = 0;  // Кут, до якого треба дійти
-unsigned long lastServoMoveTime = 0;
-const int stepDelay = 60;  // Затримка (швидкість) як у твоєму прикладі
+const int stepDelay = 60;  // Затримка (швидкість) - чим більше, тим повільніше і плавніше
 
 void onCommandReceived(String cmd, String source) {
     lastCmd = cmd;
@@ -67,7 +66,8 @@ void onCommandReceived(String cmd, String source) {
         
         LOGF("[ACTUATOR] New Target Servo Angle: %d\n", angle);
         
-        // Ми просто встановлюємо ЦІЛЬ. Рухати будемо в loop()
+        // Встановлюємо нову ціль. 
+        // Рух почнеться автоматично в головному циклі loop()
         targetServoAngle = angle;
     }
     // --- ЛОГІКА РЕЛЕ (Світло/Нагрів) ---
@@ -107,7 +107,7 @@ void updateDisplay() {
         u8g2.print("H:"); u8g2.print(hum, 0); 
         u8g2.setCursor(35, 29);
         u8g2.print("S:"); u8g2.print(currentServoAngle);
-        // Додаємо індикатор руху, якщо ще не дійшли до цілі
+        // Додаємо індикатор руху
         if(currentServoAngle != targetServoAngle) {
              u8g2.print("->"); 
         }
@@ -181,11 +181,11 @@ void setup() {
     // --- Ініціалізація СЕРВО ---
     LOG("Init Servo MG996R on GPIO 0...");
     
-    // Важливо для C3, як у твоєму прикладі
+    // Важливо для C3: Виділяємо таймер
     ESP32PWM::allocateTimer(0);
     incubatorServo.setPeriodHertz(50); 
     
-    // Використовуємо твої параметри імпульсу
+    // Використовуємо параметри імпульсу для MG996R
     incubatorServo.attach(SERVO_PIN, 500, 2400);
     
     // Стартова позиція
@@ -198,7 +198,7 @@ void setup() {
     u8g2.drawStr(0, 10, "System Init...");
     u8g2.setCursor(0, 30);
     u8g2.print("ID: ");
-    // Показуємо тільки останні 6 символів ID, бо екран маленький
+    // Показуємо тільки хвіст ID
     u8g2.print(String(uniqueDeviceId).substring(10));
     u8g2.sendBuffer();
     delay(2000);
@@ -217,25 +217,39 @@ void setup() {
 
 void loop() {
     checkHardwareButton();
-    if(network) network->handle();
 
-    // --- ЛОГІКА ПЛАВНОГО РУХУ (НЕБЛОКУЮЧА) ---
-    // Це працює як твій smoothMove, але не зупиняє роботу WiFi
+    // --- ПРІОРИТЕТНА ЛОГІКА РУХУ (BLOCKING MODE) ---
+    // Якщо поточний кут не дорівнює цільовому, ми НЕ виконуємо нічого іншого,
+    // поки не дійдемо до цілі. Це забезпечує максимальну плавність і точність.
+    
     if (currentServoAngle != targetServoAngle) {
-        if (millis() - lastServoMoveTime >= stepDelay) {
-            lastServoMoveTime = millis();
-            
-            // Робимо один крок до цілі
-            if (currentServoAngle < targetServoAngle) {
-                currentServoAngle++;
-            } else {
-                currentServoAngle--;
-            }
-            
-            incubatorServo.write(currentServoAngle);
-            // LOGF("Servo Moving: %d\n", currentServoAngle); // Можна розкоментувати для дебагу
+        
+        // Визначаємо напрямок кроку
+        if (currentServoAngle < targetServoAngle) {
+            currentServoAngle++;
+        } else {
+            currentServoAngle--;
         }
+        
+        // Фізичний рух
+        incubatorServo.write(currentServoAngle);
+        
+        // Оновлюємо екран (щоб бачити прогрес)
+        updateDisplay();
+        
+        // Блокуюча затримка - процесор чекає тільки сервопривід
+        delay(stepDelay); 
+        
+        // RETURN тут критичний: він змушує loop() початися спочатку,
+        // пропускаючи network->handle() та зчитування датчиків внизу.
+        // Це триватиме доти, доки currentServoAngle не стане == targetServoAngle.
+        return; 
     }
+
+    // --- ФОНОВИЙ РЕЖИМ (Тільки коли серво стоїть) ---
+    // Цей код виконується тільки тоді, коли мотор досяг цілі.
+    
+    if(network) network->handle(); // Обробка WiFi та HTTP
 
     if (millis() - lastSensorRead > 2000) {
         lastSensorRead = millis();
