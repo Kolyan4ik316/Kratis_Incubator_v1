@@ -2,8 +2,10 @@
 #include <U8g2lib.h>
 #include <Wire.h>
 #include <DHT.h>
-#include <ESP32Servo.h> // БІБЛІОТЕКА ДЛЯ СЕРВО
+#include <ESP32Servo.h> 
 #include "KratisNetworkManager.h" 
+#include <time.h> 
+#include <Preferences.h> 
 
 // --- DEBUG CONFIG ---
 #define DEBUG 1 
@@ -20,7 +22,7 @@
 const char* SERVER_URL = "https://kratis-p2p-server.onrender.com"; 
 const char* DEVICE_TYPE = "incubator_v1";
 
-char uniqueDeviceId[32]; // Буфер для ID
+char uniqueDeviceId[32]; 
 
 const char* AP_SSID = "Kratis-Incubator-01";
 const char* AP_PASS = "12345678";
@@ -31,26 +33,52 @@ const char* AP_PASS = "12345678";
 #define BOOT_BUTTON_PIN 9
 #define DHTPIN 2      
 #define DHTTYPE DHT22 
-#define SERVO_PIN 0   // Твій пін для серво
+#define SERVO_PIN 0   
 
 DHT dht(DHTPIN, DHTTYPE);
 U8G2_SSD1306_72X40_ER_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
-// Об'єкт сервоприводу
+// Об'єкти
 Servo incubatorServo;
-
 KratisNetworkManager* network = nullptr; 
+Preferences preferences; // Основний об'єкт пам'яті
 
 unsigned long lastSensorRead = 0;
 unsigned long buttonPressStart = 0;
+unsigned long lastTimeSave = 0; // Таймер для збереження часу
+
 float temp = 0.0;
 float hum = 0.0;
 String lastCmd = "Start";
 
-// --- ЗМІННІ ДЛЯ ПЛАВНОГО РУХУ ---
-int currentServoAngle = 0; // Поточний реальний кут
-int targetServoAngle = 0;  // Кут, до якого треба дійти
-const int stepDelay = 60;  // Затримка (швидкість) - чим більше, тим повільніше і плавніше
+// --- ЗМІННІ ДЛЯ СЕРВО ---
+int currentServoAngle = 0; 
+int targetServoAngle = 0;  
+const int stepDelay = 60; 
+
+// Отримання часу (рядок)
+String getFormattedTime() {
+    struct tm timeinfo;
+    if(!getLocalTime(&timeinfo)){
+        return "--:--";
+    }
+    if (timeinfo.tm_year < 120) return "--:--";
+
+    char timeStringBuff[16];
+    // Формат: HH:MM DD.MM
+    strftime(timeStringBuff, sizeof(timeStringBuff), "%H:%M %d.%m", &timeinfo);
+    return String(timeStringBuff);
+}
+
+// Функція збереження поточного часу (Timestamp) в пам'ять
+void saveCurrentTime() {
+    time_t now;
+    time(&now);
+    if (now > 1600000000) { // Перевірка, чи час валідний (більше 2020 року)
+        preferences.putULong("saved_time", (unsigned long)now);
+        LOGF("[MEMORY] Time Saved: %lu\n", (unsigned long)now);
+    }
+}
 
 void onCommandReceived(String cmd, String source) {
     lastCmd = cmd;
@@ -58,25 +86,32 @@ void onCommandReceived(String cmd, String source) {
     
     // --- ЛОГІКА СЕРВО ---
     if (cmd.startsWith("SERVO:")) {
-        int angle = cmd.substring(6).toInt();
+        // 1. Зберігаємо час ПЕРЕД початком руху (вимога)
+        saveCurrentTime();
         
-        // Захист від дурня (MG996R має межі 0-180)
+        int angle = cmd.substring(6).toInt();
         if (angle < 0) angle = 0;
         if (angle > 180) angle = 180;
         
-        LOGF("[ACTUATOR] New Target Servo Angle: %d\n", angle);
+        LOGF("[ACTUATOR] New Target: %d\n", angle);
+        targetServoAngle = angle; 
         
-        // Встановлюємо нову ціль. 
-        // Рух почнеться автоматично в головному циклі loop()
-        targetServoAngle = angle;
+        // Зберігаємо ціль
+        preferences.putInt("target", targetServoAngle);
     }
-    // --- ЛОГІКА РЕЛЕ (Світло/Нагрів) ---
-    else if (cmd == "LIGHT:ON") {
-        // Тут можна додати керування реле
-        LOG("[ACTUATOR] Light ON");
-    }
-    else if (cmd == "LIGHT:OFF") {
-        LOG("[ACTUATOR] Light OFF");
+    // --- СИНХРОНІЗАЦІЯ ЧАСУ ---
+    else if (cmd.startsWith("SYNC_TIME:")) {
+        long unsigned int epoch = strtoul(cmd.substring(10).c_str(), NULL, 10);
+        if (epoch > 1600000000) {
+            struct timeval tv;
+            tv.tv_sec = epoch;
+            tv.tv_usec = 0;
+            settimeofday(&tv, NULL);
+            LOGF("[TIME] Synced: %lu\n", epoch);
+            
+            // Одразу збережемо свіжий час
+            saveCurrentTime();
+        }
     }
 }
 
@@ -89,14 +124,19 @@ void updateDisplay() {
         u8g2.drawStr(0, 19, AP_SSID); 
         u8g2.drawStr(0, 29, "192.168.4.1");
     } else {
-        // Рядок 1: Статус WiFi
+        // Рядок 1: ЧАС
+        String header = "";
+        
         if (!network->isConnected()) {
-            u8g2.drawStr(0, 9, ".NO WIFI.");
-        } else if (network->isCloudActive()) {
-            u8g2.drawStr(0, 9, "CLOUD");
+             header = "!NO WIFI!"; 
         } else {
-            u8g2.drawStr(0, 9, "LAN");
+             String timeStr = getFormattedTime();
+             if (timeStr == "--:--") header = "Loading...";
+             else header = timeStr;
         }
+        
+        u8g2.setCursor(0, 9);
+        u8g2.print(header);
         
         // Рядок 2: Температура
         u8g2.setCursor(0, 19); 
@@ -107,12 +147,9 @@ void updateDisplay() {
         u8g2.print("H:"); u8g2.print(hum, 0); 
         u8g2.setCursor(35, 29);
         u8g2.print("S:"); u8g2.print(currentServoAngle);
-        // Додаємо індикатор руху
-        if(currentServoAngle != targetServoAngle) {
-             u8g2.print("->"); 
-        }
+        if(currentServoAngle != targetServoAngle) u8g2.print(">"); 
         
-        // Рядок 4: Остання команда (обрізана)
+        // Рядок 4: Команда
         u8g2.setCursor(0, 39);
         String shortCmd = lastCmd.length() > 10 ? lastCmd.substring(0, 10) : lastCmd;
         u8g2.print(">" + shortCmd);
@@ -121,34 +158,25 @@ void updateDisplay() {
 }
 
 void checkHardwareButton() {
-    // На C3 кнопка BOOT при натисканні дає LOW
     if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
         if (buttonPressStart == 0) {
             buttonPressStart = millis();
-            LOG("Button Pressed...");
         }
-        
         unsigned long duration = millis() - buttonPressStart;
 
-        // Довге натискання > 10с = Скидання
         if (duration > 10000) { 
-            LOG("Button hold > 10s. Triggering FACTORY RESET!");
             u8g2.clearBuffer();
             u8g2.drawStr(0, 20, "RESETTING...");
             u8g2.sendBuffer();
             
             if(network) network->factoryReset();
+            preferences.clear(); // Очистка пам'яті
             buttonPressStart = 0; 
-            
         } 
     } else {
         if (buttonPressStart != 0) {
             unsigned long duration = millis() - buttonPressStart;
-            LOGF("[LOG] Button Released. Duration: %lu ms\n", duration);
-            
-            // Середнє натискання 3-10с = Режим точки доступу
             if (duration > 3000 && duration < 10000 && network && !network->isApMode()) {
-                LOG("Triggering AP MODE (3-10s hold)");
                 network->startApMode(AP_SSID, AP_PASS); 
             }
             buttonPressStart = 0;
@@ -168,6 +196,9 @@ void setup() {
     delay(1000); 
     LOG("\n--- SYSTEM BOOT (ESP32-C3) ---");
     
+    setenv("TZ", "EET-2EEST,M3.5.0/3,M10.5.0/4", 1);
+    tzset();
+    
     generateDeviceId();
 
     LOG("Init I2C...");
@@ -178,78 +209,77 @@ void setup() {
     u8g2.begin();
     pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
     
-    // --- Ініціалізація СЕРВО ---
-    LOG("Init Servo MG996R on GPIO 0...");
+    // --- ПАМ'ЯТЬ ---
+    preferences.begin("incubator_data", false);
     
-    // Важливо для C3: Виділяємо таймер
+    // 1. Відновлюємо позицію
+    currentServoAngle = preferences.getInt("current", 0);
+    targetServoAngle = preferences.getInt("target", 0);
+    
+    // 2. Відновлюємо час
+    unsigned long savedTime = preferences.getULong("saved_time", 0);
+    if (savedTime > 0) {
+        struct timeval tv;
+        tv.tv_sec = savedTime;
+        tv.tv_usec = 0;
+        settimeofday(&tv, NULL);
+        LOGF("[MEMORY] Restored Time: %lu\n", savedTime);
+    }
+    
+    LOGF("Memory Read -> Current: %d, Target: %d\n", currentServoAngle, targetServoAngle);
+
+    // --- СЕРВО: Тільки налаштування, БЕЗ write() ---
+    LOG("Init Servo Config...");
     ESP32PWM::allocateTimer(0);
     incubatorServo.setPeriodHertz(50); 
-    
-    // Використовуємо параметри імпульсу для MG996R
     incubatorServo.attach(SERVO_PIN, 500, 2400);
     
-    // Стартова позиція
-    incubatorServo.write(0); 
-    currentServoAngle = 0;
-    targetServoAngle = 0;
-
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x10_tf);
     u8g2.drawStr(0, 10, "System Init...");
-    u8g2.setCursor(0, 30);
-    u8g2.print("ID: ");
-    // Показуємо тільки хвіст ID
-    u8g2.print(String(uniqueDeviceId).substring(10));
+    u8g2.drawStr(0, 20, "Mem: OK");
     u8g2.sendBuffer();
     delay(2000);
 
-    LOG("Configuring Network Manager...");
+    LOG("Configuring Network...");
     network = new KratisNetworkManager(SERVER_URL, uniqueDeviceId);
-    
     network->setDeviceType(DEVICE_TYPE);
     network->setApCredentials(AP_SSID, AP_PASS); 
     network->setCommandCallback(onCommandReceived);
-    
-    LOG("Starting Network Manager...");
     network->begin();
-    LOG("Setup Complete. Entering Loop.");
 }
 
 void loop() {
     checkHardwareButton();
-
-    // --- ПРІОРИТЕТНА ЛОГІКА РУХУ (BLOCKING MODE) ---
-    // Якщо поточний кут не дорівнює цільовому, ми НЕ виконуємо нічого іншого,
-    // поки не дійдемо до цілі. Це забезпечує максимальну плавність і точність.
     
+    // --- ЛОГІКА ЗБЕРЕЖЕННЯ ЧАСУ (КОЖНІ 10 ХВ) ---
+    if (millis() - lastTimeSave > 600000) { // 600 000 мс = 10 хв
+        saveCurrentTime();
+        lastTimeSave = millis();
+    }
+
+    // --- ПРІОРИТЕТНА ЛОГІКА РУХУ (BLOCKING) ---
     if (currentServoAngle != targetServoAngle) {
         
-        // Визначаємо напрямок кроку
-        if (currentServoAngle < targetServoAngle) {
-            currentServoAngle++;
-        } else {
-            currentServoAngle--;
-        }
+        // Рухаємось
+        if (currentServoAngle < targetServoAngle) currentServoAngle++;
+        else currentServoAngle--;
         
-        // Фізичний рух
+        // Ось тут ми подаємо сигнал на сервопривід
         incubatorServo.write(currentServoAngle);
-        
-        // Оновлюємо екран (щоб бачити прогрес)
         updateDisplay();
-        
-        // Блокуюча затримка - процесор чекає тільки сервопривід
         delay(stepDelay); 
         
-        // RETURN тут критичний: він змушує loop() початися спочатку,
-        // пропускаючи network->handle() та зчитування датчиків внизу.
-        // Це триватиме доти, доки currentServoAngle не стане == targetServoAngle.
+        // Зберігаємо позицію кожні 10 градусів
+        if (currentServoAngle % 10 == 0 || currentServoAngle == targetServoAngle) {
+             preferences.putInt("current", currentServoAngle);
+        }
+        
         return; 
     }
 
-    // --- ФОНОВИЙ РЕЖИМ (Тільки коли серво стоїть) ---
-    // Цей код виконується тільки тоді, коли мотор досяг цілі.
-    
-    if(network) network->handle(); // Обробка WiFi та HTTP
+    // --- ФОНОВІ ЗАДАЧІ ---
+    if(network) network->handle();
 
     if (millis() - lastSensorRead > 2000) {
         lastSensorRead = millis();
