@@ -35,6 +35,9 @@ const char* AP_PASS = "12345678";
 #define DHTTYPE DHT22 
 #define SERVO_PIN 0   
 
+// --- НАЛАШТУВАННЯ МОСФЕТА ---
+#define HEATER_PIN 8      // Пін для Мосфета
+
 DHT dht(DHTPIN, DHTTYPE);
 U8G2_SSD1306_72X40_ER_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
@@ -233,11 +236,21 @@ void setup() {
     ESP32PWM::allocateTimer(0);
     incubatorServo.setPeriodHertz(50); 
     incubatorServo.attach(SERVO_PIN, 500, 2400);
+
+    // --- НАГРІВАЧ (МОСФЕТ) ---
+    LOG("Init Heater...");
+    // Використовуємо новий API для ESP32 Core 3.x
+    // ledcAttach(pin, frequency, resolution)
+    ledcAttach(HEATER_PIN, 1000, 8); 
+    // ledcWrite(pin, duty_cycle)
+    ledcWrite(HEATER_PIN, 155); // Вмикаємо на 100% (255)
+    //LOG("Heater ON (Max Power)");
     
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x10_tf);
     u8g2.drawStr(0, 10, "System Init...");
-    u8g2.drawStr(0, 20, "Mem: OK");
+    u8g2.drawStr(0, 20, "Heater: ON");
+    u8g2.drawStr(0, 30, "Mem: OK");
     u8g2.sendBuffer();
     delay(2000);
 
