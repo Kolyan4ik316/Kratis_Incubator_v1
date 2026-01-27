@@ -7,6 +7,10 @@
 #include <time.h> 
 #include <Preferences.h> 
 
+// --- НОВІ БІБЛІОТЕКИ ДЛЯ OTA ---
+#include <HTTPUpdate.h>
+#include <WiFiClientSecure.h>
+
 // --- DEBUG CONFIG ---
 #define DEBUG 1 
 
@@ -21,6 +25,9 @@
 // --- КОНФІГУРАЦІЯ ---
 const char* SERVER_URL = "https://kratis-p2p-server.onrender.com"; 
 const char* DEVICE_TYPE = "incubator_v1";
+
+// !!! ТУТ ЗМІНЮЄМО ВЕРСІЮ ПРИ КОЖНОМУ ОНОВЛЕННІ !!!
+#define FW_VERSION "1.0.1" 
 
 char uniqueDeviceId[32]; 
 
@@ -83,12 +90,117 @@ void saveCurrentTime() {
     }
 }
 
+// --- CALLBACK ФУНКЦІЇ ДЛЯ OTA ---
+void update_started() {
+  LOG("[OTA] Callback: Update process STARTED");
+  u8g2.clearBuffer();
+  u8g2.drawStr(0, 10, "OTA UPDATE...");
+  u8g2.sendBuffer();
+}
+
+void update_finished() {
+  LOG("[OTA] Callback: Update process FINISHED");
+  u8g2.clearBuffer();
+  u8g2.drawStr(0, 10, "UPDATE DONE!");
+  u8g2.drawStr(0, 20, "Rebooting...");
+  u8g2.sendBuffer();
+}
+
+void update_progress(int cur, int total) {
+  static int lastPercent = -1;
+  int percent = (cur * 100) / total;
+  if (percent != lastPercent && percent % 10 == 0) { // Логуємо кожні 10%
+    LOGF("[OTA] Progress: %d%%\n", percent);
+    lastPercent = percent;
+    
+    // Можна виводити на екран, але це сповільнить процес
+    u8g2.setCursor(0, 30);
+    u8g2.print(percent); u8g2.print("%");
+    u8g2.sendBuffer();
+  }
+}
+
+void update_error(int err) {
+  LOGF("[OTA] Callback: ERROR code %d\n", err);
+}
+
+// --- ФУНКЦІЯ ОНОВЛЕННЯ ПРОШИВКИ ---
+void performUpdate(String url) {
+    if (url.length() < 10) {
+        LOG("[OTA] Error: Invalid URL");
+        return;
+    }
+
+    LOG("\n[OTA] --- STARTING FIRMWARE UPDATE ---");
+    LOG("[OTA] URL: " + url);
+    LOGF("[OTA] Current Free Heap: %d bytes\n", ESP.getFreeHeap());
+    LOGF("[OTA] Free Sketch Space: %d bytes\n", ESP.getFreeSketchSpace());
+
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_6x10_tf);
+    u8g2.drawStr(0, 10, "CONNECTING OTA...");
+    u8g2.sendBuffer();
+
+    WiFiClientSecure client;
+    client.setInsecure(); 
+    
+    // Підключаємо колбеки для детального логування
+    httpUpdate.onStart(update_started);
+    httpUpdate.onEnd(update_finished);
+    httpUpdate.onProgress(update_progress);
+    httpUpdate.onError(update_error);
+
+    // Важливо: ми самі перезавантажимо, якщо все ОК
+    httpUpdate.rebootOnUpdate(false); 
+    
+    LOG("[OTA] Requesting file from server...");
+    
+    // Запускаємо оновлення
+    t_httpUpdate_return ret = httpUpdate.update(client, url);
+
+    // Обробка результату
+    switch (ret) {
+      case HTTP_UPDATE_FAILED:
+        LOGF("[OTA] FAILED! Error (%d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+        u8g2.clearBuffer();
+        u8g2.drawStr(0, 20, "UPDATE FAILED!");
+        u8g2.setCursor(0, 30);
+        u8g2.print("Err: "); u8g2.print(httpUpdate.getLastError());
+        u8g2.sendBuffer();
+        delay(5000);
+        break;
+
+      case HTTP_UPDATE_NO_UPDATES:
+        LOG("[OTA] Server says: No updates");
+        break;
+
+      case HTTP_UPDATE_OK:
+        LOG("[OTA] SUCCESS! Firmware written.");
+        LOG("[OTA] Restarting system in 3 seconds...");
+        u8g2.clearBuffer();
+        u8g2.drawStr(0, 20, "SUCCESS!");
+        u8g2.drawStr(0, 30, "Rebooting...");
+        u8g2.sendBuffer();
+        delay(3000);
+        ESP.restart();
+        break;
+    }
+}
+
 void onCommandReceived(String cmd, String source) {
     lastCmd = cmd;
     LOGF("[LOG] Command Received: %s via %s\n", cmd.c_str(), source.c_str());
     
+    // --- ОНОВЛЕННЯ ПРОШИВКИ (OTA) ---
+    // Очікуваний формат: "UPDATE:https://myserver.com/firmware.bin"
+    if (cmd.startsWith("UPDATE:")) {
+        String url = cmd.substring(7); // Обрізаємо "UPDATE:"
+        if (url.length() > 5) {
+            performUpdate(url);
+        }
+    }
     // --- ЛОГІКА СЕРВО ---
-    if (cmd.startsWith("SERVO:")) {
+    else if (cmd.startsWith("SERVO:")) {
         // 1. Зберігаємо час ПЕРЕД початком руху (вимога)
         saveCurrentTime();
         
@@ -141,9 +253,11 @@ void updateDisplay() {
         u8g2.setCursor(0, 9);
         u8g2.print(header);
         
-        // Рядок 2: Температура
+        // Рядок 2: Температура + Версія (маленька буква v)
         u8g2.setCursor(0, 19); 
         u8g2.print("T:"); u8g2.print(temp, 1);
+        u8g2.setCursor(50, 19);
+        u8g2.print("v"); u8g2.print(FW_VERSION); // Покажемо версію
         
         // Рядок 3: Вологість + Кут серви
         u8g2.setCursor(0, 29); 
@@ -198,6 +312,7 @@ void setup() {
     Serial.begin(115200);
     delay(1000); 
     LOG("\n--- SYSTEM BOOT (ESP32-C3) ---");
+    LOGF("Firmware Version: %s\n", FW_VERSION);
     
     setenv("TZ", "EET-2EEST,M3.5.0/3,M10.5.0/4", 1);
     tzset();
@@ -240,11 +355,9 @@ void setup() {
     // --- НАГРІВАЧ (МОСФЕТ) ---
     LOG("Init Heater...");
     // Використовуємо новий API для ESP32 Core 3.x
-    // ledcAttach(pin, frequency, resolution)
     ledcAttach(HEATER_PIN, 1000, 8); 
-    // ledcWrite(pin, duty_cycle)
-    ledcWrite(HEATER_PIN, 155); // Вмикаємо на 100% (255)
-    //LOG("Heater ON (Max Power)");
+    ledcWrite(HEATER_PIN, 255); // Вмикаємо на 100% (255)
+    LOG("Heater ON (Max Power)");
     
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x10_tf);
@@ -257,6 +370,10 @@ void setup() {
     LOG("Configuring Network...");
     network = new KratisNetworkManager(SERVER_URL, uniqueDeviceId);
     network->setDeviceType(DEVICE_TYPE);
+    
+    // --- НОВЕ: Передаємо версію прошивки ---
+    network->setFirmwareVersion(FW_VERSION);
+    
     network->setApCredentials(AP_SSID, AP_PASS); 
     network->setCommandCallback(onCommandReceived);
     network->begin();

@@ -23,6 +23,12 @@ void KratisNetworkManager::setDeviceType(const char* type) {
     _deviceType = String(type);
 }
 
+// Реалізація встановлення версії
+void KratisNetworkManager::setFirmwareVersion(const char* version) {
+    _fwVersion = String(version);
+    LOGF_NM("Firmware Version set to: %s\n", _fwVersion.c_str());
+}
+
 void KratisNetworkManager::begin() {
     LOG_NM("Starting...");
     _preferences.begin("config", true); 
@@ -94,10 +100,8 @@ void KratisNetworkManager::handle() {
             pollCloudServer();
         }
         
-        // ЗАВЖДИ слухаємо локальні запити
         _server->handleClient();
 
-        // ЗАВЖДИ (з інтервалом) слухаємо хмару
         if (millis() - _lastPollTime > CLOUD_POLL_INTERVAL) {
             _lastPollTime = millis();
             pollCloudServer();
@@ -121,6 +125,7 @@ void KratisNetworkManager::handleLocalRequest() {
     JsonDocument doc;
     doc["status"] = "ok";
     doc["type"] = _deviceType;
+    doc["fw_ver"] = _fwVersion; 
     doc["temp"] = _temp;
     doc["hum"] = _hum;
     doc["owner"] = _ownerId;
@@ -135,12 +140,13 @@ void KratisNetworkManager::pollCloudServer() {
     if (WiFi.status() != WL_CONNECTED) return;
     
     HTTPClient http;
-    http.setTimeout(2000); 
+    http.setTimeout(10000); // Збільшено таймаут до 10с для надійності OTA
     String url = String(_serverUrl) + "/api/sync";
     
     JsonDocument doc;
     doc["id"] = _deviceId;
     doc["type"] = _deviceType;
+    doc["fw_version"] = _fwVersion; 
     doc["local_ip"] = WiFi.localIP().toString();
     
     JsonObject data = doc["data"].to<JsonObject>();
@@ -149,6 +155,8 @@ void KratisNetworkManager::pollCloudServer() {
     
     String jsonBody;
     serializeJson(doc, jsonBody);
+
+    // LOGF_NM("Sending Sync (v%s)...", _fwVersion.c_str()); // Debug
 
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
@@ -161,9 +169,11 @@ void KratisNetworkManager::pollCloudServer() {
         
         if (!error && !respDoc["cmd"].isNull() && _onCommand) {
             String cmd = respDoc["cmd"].as<String>();
+            LOGF_NM("Received Command from Cloud: %s\n", cmd.c_str());
             _onCommand(cmd, "CLOUD");
-            LOGF_NM("Executed Cloud Command: %s\n", cmd.c_str());
         }
+    } else {
+        // LOGF_NM("Sync Failed. HTTP Code: %d\n", code);
     }
     http.end();
 }
@@ -186,6 +196,7 @@ void KratisNetworkManager::startApMode(const char* ssid, const char* password) {
         JsonDocument doc;
         doc["device_id"] = _deviceId;
         doc["type"] = _deviceType;
+        doc["fw_ver"] = _fwVersion;
         doc["status"] = "waiting_config";
         String r; serializeJson(doc, r);
         _server->sendHeader("Access-Control-Allow-Origin", "*");

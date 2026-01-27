@@ -9,6 +9,7 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 
+// Визначення типу для callback-функції
 typedef std::function<void(String, String)> CommandCallback;
 
 class KratisNetworkManager {
@@ -16,15 +17,17 @@ public:
     KratisNetworkManager(const char* serverUrl, const char* deviceId);
     ~KratisNetworkManager();
 
-    // Налаштування назви точки доступу
+    // Налаштування
     void setApCredentials(const char* ssid, const char* password);
     void setDeviceType(const char* type);
+    
+    // Встановлення версії прошивки (викликати в setup)
+    void setFirmwareVersion(const char* version);
 
     void begin();
     void handle(); 
     void updateSensorData(float temp, float hum);
 
-    // Тепер можна передати аргументи або використати збережені
     void startApMode(const char* ssid = nullptr, const char* password = nullptr);
     void factoryReset();
     
@@ -39,6 +42,7 @@ private:
     const char* _serverUrl;
     const char* _deviceId;
     String _deviceType = "unknown";
+    String _fwVersion = "1.0.0"; // Значення за замовчуванням
     
     String _apSsid = "Kratis-Setup";
     String _apPass = "12345678";
