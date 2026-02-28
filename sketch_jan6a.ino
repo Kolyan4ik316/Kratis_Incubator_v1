@@ -5,7 +5,8 @@
 #include <ESP32Servo.h> 
 #include "KratisNetworkManager.h" 
 #include <time.h> 
-#include <Preferences.h> 
+#include <Preferences.h>
+
 
 // --- НОВІ БІБЛІОТЕКИ ДЛЯ OTA ---
 #include <HTTPUpdate.h>
@@ -25,14 +26,13 @@
 // --- КОНФІГУРАЦІЯ ---
 const char* SERVER_URL = "https://kratis-p2p-server.onrender.com"; 
 const char* DEVICE_TYPE = "incubator_v1";
-
-// !!! ТУТ ЗМІНЮЄМО ВЕРСІЮ ПРИ КОЖНОМУ ОНОВЛЕННІ !!!
 #define FW_VERSION "1.0.1" 
 
 char uniqueDeviceId[32]; 
-
 const char* AP_SSID = "Kratis-Incubator-01";
 const char* AP_PASS = "12345678";
+
+
 
 // --- ПІНИ ESP32-C3 SUPER MINI ---
 #define I2C_SDA 5
@@ -42,8 +42,17 @@ const char* AP_PASS = "12345678";
 #define DHTTYPE DHT22 
 #define SERVO_PIN 0   
 
-// --- НАЛАШТУВАННЯ МОСФЕТА ---
-#define HEATER_PIN 8      // Пін для Мосфета
+// --- НАЛАШТУВАННЯ ПЕРИФЕРІЇ (МОСФЕТИ ТА РЕЛЕ) ---
+#define HEATER_PIN 7      // Пін для Мосфета нагрівача (ШІМ)
+#define FAN_PIN 3         // Пін для Мосфета вентилятора (ШІМ)
+#define HUMIDIFIER_PIN 4 // Пін для Зволожувача (ON/OFF)
+
+// --- НАЛАШТУВАННЯ QC 3.0 (ДЛЯ РЕГУЛЮВАННЯ НАПРУГИ) ---
+// ТЕПЕР ЗГІДНО З РЕАЛЬНОЮ ПАЙКОЮ:
+// Пін 10 йде на D+ (через 2.2кОм, і 10кОм до землі)
+// Пін 1 йде на D- (через 2.2кОм, і 1кОм до землі)
+#define PIN_DP 10
+#define PIN_DM 1
 
 DHT dht(DHTPIN, DHTTYPE);
 U8G2_SSD1306_72X40_ER_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
@@ -51,11 +60,11 @@ U8G2_SSD1306_72X40_ER_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 // Об'єкти
 Servo incubatorServo;
 KratisNetworkManager* network = nullptr; 
-Preferences preferences; // Основний об'єкт пам'яті
+Preferences preferences; 
 
 unsigned long lastSensorRead = 0;
 unsigned long buttonPressStart = 0;
-unsigned long lastTimeSave = 0; // Таймер для збереження часу
+unsigned long lastTimeSave = 0; 
 
 float temp = 0.0;
 float hum = 0.0;
@@ -64,167 +73,158 @@ String lastCmd = "Start";
 // --- ЗМІННІ ДЛЯ СЕРВО ---
 int currentServoAngle = 0; 
 int targetServoAngle = 0;  
-const int stepDelay = 60; 
+const int stepDelay = 60;
 
-// Отримання часу (рядок)
+float m_current = 5.0;
+
+// Отримання часу
 String getFormattedTime() {
     struct tm timeinfo;
-    if(!getLocalTime(&timeinfo)){
-        return "--:--";
-    }
+    if(!getLocalTime(&timeinfo)) return "--:--";
     if (timeinfo.tm_year < 120) return "--:--";
-
     char timeStringBuff[16];
-    // Формат: HH:MM DD.MM
     strftime(timeStringBuff, sizeof(timeStringBuff), "%H:%M %d.%m", &timeinfo);
     return String(timeStringBuff);
 }
 
-// Функція збереження поточного часу (Timestamp) в пам'ять
 void saveCurrentTime() {
     time_t now;
     time(&now);
-    if (now > 1600000000) { // Перевірка, чи час валідний (більше 2020 року)
+    if (now > 1600000000) {
         preferences.putULong("saved_time", (unsigned long)now);
         LOGF("[MEMORY] Time Saved: %lu\n", (unsigned long)now);
     }
 }
 
-// --- CALLBACK ФУНКЦІЇ ДЛЯ OTA ---
-void update_started() {
-  LOG("[OTA] Callback: Update process STARTED");
-  u8g2.clearBuffer();
-  u8g2.drawStr(0, 10, "OTA UPDATE...");
-  u8g2.sendBuffer();
-}
+// --- OTA CALLBACKS ---
+void update_started() { LOG("[OTA] Update STARTED"); }
+void update_finished() { LOG("[OTA] Update FINISHED"); }
+void update_progress(int cur, int total) { LOGF("[OTA] Progress: %d%%\n", (cur * 100) / total); }
+void update_error(int err) { LOGF("[OTA] ERROR code %d\n", err); }
 
-void update_finished() {
-  LOG("[OTA] Callback: Update process FINISHED");
-  u8g2.clearBuffer();
-  u8g2.drawStr(0, 10, "UPDATE DONE!");
-  u8g2.drawStr(0, 20, "Rebooting...");
-  u8g2.sendBuffer();
-}
-
-void update_progress(int cur, int total) {
-  static int lastPercent = -1;
-  int percent = (cur * 100) / total;
-  if (percent != lastPercent && percent % 10 == 0) { // Логуємо кожні 10%
-    LOGF("[OTA] Progress: %d%%\n", percent);
-    lastPercent = percent;
-    
-    // Можна виводити на екран, але це сповільнить процес
-    u8g2.setCursor(0, 30);
-    u8g2.print(percent); u8g2.print("%");
-    u8g2.sendBuffer();
-  }
-}
-
-void update_error(int err) {
-  LOGF("[OTA] Callback: ERROR code %d\n", err);
-}
-
-// --- ФУНКЦІЯ ОНОВЛЕННЯ ПРОШИВКИ ---
 void performUpdate(String url) {
-    if (url.length() < 10) {
-        LOG("[OTA] Error: Invalid URL");
-        return;
-    }
-
-    LOG("\n[OTA] --- STARTING FIRMWARE UPDATE ---");
-    LOG("[OTA] URL: " + url);
-    LOGF("[OTA] Current Free Heap: %d bytes\n", ESP.getFreeHeap());
-    LOGF("[OTA] Free Sketch Space: %d bytes\n", ESP.getFreeSketchSpace());
-
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_6x10_tf);
-    u8g2.drawStr(0, 10, "CONNECTING OTA...");
-    u8g2.sendBuffer();
-
+    if (url.length() < 10) return;
     WiFiClientSecure client;
     client.setInsecure(); 
-    
-    // Підключаємо колбеки для детального логування
     httpUpdate.onStart(update_started);
     httpUpdate.onEnd(update_finished);
     httpUpdate.onProgress(update_progress);
     httpUpdate.onError(update_error);
-
-    // Важливо: ми самі перезавантажимо, якщо все ОК
     httpUpdate.rebootOnUpdate(false); 
-    
-    LOG("[OTA] Requesting file from server...");
-    
-    // Запускаємо оновлення
     t_httpUpdate_return ret = httpUpdate.update(client, url);
-
-    // Обробка результату
-    switch (ret) {
-      case HTTP_UPDATE_FAILED:
-        LOGF("[OTA] FAILED! Error (%d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
-        u8g2.clearBuffer();
-        u8g2.drawStr(0, 20, "UPDATE FAILED!");
-        u8g2.setCursor(0, 30);
-        u8g2.print("Err: "); u8g2.print(httpUpdate.getLastError());
-        u8g2.sendBuffer();
-        delay(5000);
-        break;
-
-      case HTTP_UPDATE_NO_UPDATES:
-        LOG("[OTA] Server says: No updates");
-        break;
-
-      case HTTP_UPDATE_OK:
-        LOG("[OTA] SUCCESS! Firmware written.");
-        LOG("[OTA] Restarting system in 3 seconds...");
-        u8g2.clearBuffer();
-        u8g2.drawStr(0, 20, "SUCCESS!");
-        u8g2.drawStr(0, 30, "Rebooting...");
-        u8g2.sendBuffer();
+    if (ret == HTTP_UPDATE_OK) {
         delay(3000);
         ESP.restart();
-        break;
     }
+}
+
+// --- ОБРОБКА КОМАНД (ВКЛЮЧАЮЧИ КАЛІБРУВАННЯ) ---
+void set9V_Custom() {
+  LOG("[QC] Starting 9V negotiation...");
+
+  // 0. Initial State (D+ and D- as inputs to let charger do its magic)
+  pinMode(PIN_DP, INPUT);
+  pinMode(PIN_DM, INPUT);
+  delay(1200); // Wait for initial charging sequence (BC1.2) to finish
+
+  // 1. Enter QC mode
+  // To enter QC mode from normal 5V, we need to hold D+ > 0.325V for 1.25s
+  pinMode(PIN_DP, OUTPUT);
+  digitalWrite(PIN_DP, HIGH); // Gives ~2.7V
+  pinMode(PIN_DM, OUTPUT);
+  digitalWrite(PIN_DM, LOW); // Gives 0V
+  
+  delay(1500); // 1.5s wait to ensure charger enters QC mode
+
+  // 2. Request 9V
+  // D+ = 3.3V, D- = 0.6V logic
+  // Our D+ is already HIGH (2.7V). We set D- HIGH (~1.03V)
+  digitalWrite(PIN_DM, HIGH);
+  LOG("[QC] 9V Requested (DP=2.7V, DM=1.03V)!");
+}
+
+void set5V_Custom() {
+  pinMode(PIN_DP, OUTPUT);
+  digitalWrite(PIN_DP, LOW);
+  pinMode(PIN_DM, OUTPUT);
+  digitalWrite(PIN_DM, LOW);
+  LOG("[QC] 5V Requested (DP=0V, DM=0V)");
+}
+
+void set12V_Custom() {
+  pinMode(PIN_DP, OUTPUT);
+  digitalWrite(PIN_DP, HIGH);
+  pinMode(PIN_DM, OUTPUT);
+  digitalWrite(PIN_DM, LOW);
+  LOG("[QC] 12V Requested (DP=High, DM=Low)");
 }
 
 void onCommandReceived(String cmd, String source) {
     lastCmd = cmd;
     LOGF("[LOG] Command Received: %s via %s\n", cmd.c_str(), source.c_str());
     
-    // --- ОНОВЛЕННЯ ПРОШИВКИ (OTA) ---
-    // Очікуваний формат: "UPDATE:https://myserver.com/firmware.bin"
+    // OTA Update
     if (cmd.startsWith("UPDATE:")) {
-        String url = cmd.substring(7); // Обрізаємо "UPDATE:"
-        if (url.length() > 5) {
-            performUpdate(url);
-        }
+        m_current = 5.0;
+        set5V_Custom();
+        performUpdate(cmd.substring(7));
     }
-    // --- ЛОГІКА СЕРВО ---
-    else if (cmd.startsWith("SERVO:")) {
-        // 1. Зберігаємо час ПЕРЕД початком руху (вимога)
+    
+    // --- КАЛІБРУВАННЯ НАГРІВАЧА (0-100%) ---
+    else if (cmd.startsWith("CAL_HEAT:")) {
+        LOG("[QC] Calling set9V_Custom...");
+        
+        set9V_Custom();
+
+        m_current = 9.0;
+        LOG("[QC] TEST D+ High, D- Input.");
+        int power = cmd.substring(9).toInt();
+        power = constrain(power, 0, 100);
+        int pwm = map(power, 0, 100, 0, 254);
+        ledcWrite(HEATER_PIN, pwm);
+        LOGF("[CAL] Heater: %d%% (PWM: %d)\n", power, pwm);
+    }
+
+    // --- КАЛІБРУВАННЯ ВЕНТИЛЯТОРА (0-100%) ---
+    else if (cmd.startsWith("CAL_FAN:")) {
+        LOG("[QC] Attempting to set 5V...");
+        set5V_Custom(); // Повертаємо 5V стандарним методом
+        m_current = 5.0;
+        LOG("[QC] 5V command sent.");
+        int speed = cmd.substring(8).toInt();
+        speed = constrain(speed, 0, 100);
+        int pwm = map(speed, 0, 100, 0, 255);
+        ledcWrite(FAN_PIN, pwm);
+        LOGF("[CAL] Fan: %d%% (PWM: %d)\n", speed, pwm);
+    }
+
+    // --- КАЛІБРУВАННЯ СЕРВО (0-180) ---
+    else if (cmd.startsWith("CAL_SERVO:") || cmd.startsWith("SERVO:")) {
         saveCurrentTime();
-        
-        int angle = cmd.substring(6).toInt();
-        if (angle < 0) angle = 0;
-        if (angle > 180) angle = 180;
-        
-        LOGF("[ACTUATOR] New Target: %d\n", angle);
-        targetServoAngle = angle; 
-        
-        // Зберігаємо ціль
+        int offset = cmd.startsWith("CAL_SERVO:") ? 10 : 6;
+        int angle = cmd.substring(offset).toInt();
+        targetServoAngle = constrain(angle, 0, 180);
+        LOGF("[CAL] Servo Target: %d\n", targetServoAngle);
         preferences.putInt("target", targetServoAngle);
     }
-    // --- СИНХРОНІЗАЦІЯ ЧАСУ ---
+
+    // --- КЕРУВАННЯ ЗВОЛОЖУВАЧЕМ ---
+    else if (cmd.startsWith("CAL_HUM:")) {
+        LOG("[QC] Attempting to set 12V...");
+        set12V_Custom(); // Повертаємо 12V стандарним методом
+        m_current = 12.0;
+        LOG("[QC] 12V command sent.");
+        int state = cmd.substring(8).toInt();
+        digitalWrite(HUMIDIFIER_PIN, state == 1 ? HIGH : LOW);
+        LOGF("[CAL] Humidifier: %s\n", state == 1 ? "ON" : "OFF");
+    }
+
+    // Sync Time
     else if (cmd.startsWith("SYNC_TIME:")) {
-        long unsigned int epoch = strtoul(cmd.substring(10).c_str(), NULL, 10);
+        unsigned long epoch = strtoul(cmd.substring(10).c_str(), NULL, 10);
         if (epoch > 1600000000) {
-            struct timeval tv;
-            tv.tv_sec = epoch;
-            tv.tv_usec = 0;
+            struct timeval tv = { .tv_sec = (time_t)epoch, .tv_usec = 0 };
             settimeofday(&tv, NULL);
-            LOGF("[TIME] Synced: %lu\n", epoch);
-            
-            // Одразу збережемо свіжий час
             saveCurrentTime();
         }
     }
@@ -233,69 +233,36 @@ void onCommandReceived(String cmd, String source) {
 void updateDisplay() {
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x10_tf);
-
     if (network->isApMode()) {
         u8g2.drawStr(0, 9, "SETUP MODE");
         u8g2.drawStr(0, 19, AP_SSID); 
-        u8g2.drawStr(0, 29, "192.168.4.1");
+        //u8g2.drawStr(0, 29, "192.168.4.1");
     } else {
-        // Рядок 1: ЧАС
-        String header = "";
-        
-        if (!network->isConnected()) {
-             header = "!NO WIFI!"; 
-        } else {
-             String timeStr = getFormattedTime();
-             if (timeStr == "--:--") header = "Loading...";
-             else header = timeStr;
-        }
-        
-        u8g2.setCursor(0, 9);
-        u8g2.print(header);
-        
-        // Рядок 2: Температура + Версія (маленька буква v)
-        u8g2.setCursor(0, 19); 
-        u8g2.print("T:"); u8g2.print(temp, 1);
-        u8g2.setCursor(50, 19);
-        u8g2.print("v"); u8g2.print(FW_VERSION); // Покажемо версію
-        
-        // Рядок 3: Вологість + Кут серви
-        u8g2.setCursor(0, 29); 
-        u8g2.print("H:"); u8g2.print(hum, 0); 
-        u8g2.setCursor(35, 29);
-        u8g2.print("S:"); u8g2.print(currentServoAngle);
+        String header = network->isConnected() ? getFormattedTime() : "!NO WIFI!";
+        u8g2.setCursor(0, 9); u8g2.print(header);
+        u8g2.setCursor(0, 19); u8g2.print("T:"); u8g2.print(temp, 1);
+        u8g2.setCursor(37, 19); u8g2.print("v"); u8g2.print(m_current);
+        u8g2.setCursor(0, 29); u8g2.print("H:"); u8g2.print(hum, 0); 
+        u8g2.setCursor(35, 29); u8g2.print("S:"); u8g2.print(currentServoAngle);
         if(currentServoAngle != targetServoAngle) u8g2.print(">"); 
-        
-        // Рядок 4: Команда
         u8g2.setCursor(0, 39);
-        String shortCmd = lastCmd.length() > 10 ? lastCmd.substring(0, 10) : lastCmd;
-        u8g2.print(">" + shortCmd);
+        u8g2.print(">" + (lastCmd.length() > 10 ? lastCmd.substring(0, 10) : lastCmd));
     }
     u8g2.sendBuffer();
 }
 
 void checkHardwareButton() {
     if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
-        if (buttonPressStart == 0) {
-            buttonPressStart = millis();
-        }
-        unsigned long duration = millis() - buttonPressStart;
-
-        if (duration > 10000) { 
-            u8g2.clearBuffer();
-            u8g2.drawStr(0, 20, "RESETTING...");
-            u8g2.sendBuffer();
-            
-            if(network) network->factoryReset();
-            preferences.clear(); // Очистка пам'яті
-            buttonPressStart = 0; 
+        if (buttonPressStart == 0) buttonPressStart = millis();
+        if (millis() - buttonPressStart > 10000) { 
+            network->factoryReset();
+            preferences.clear();
+            ESP.restart();
         } 
     } else {
         if (buttonPressStart != 0) {
-            unsigned long duration = millis() - buttonPressStart;
-            if (duration > 3000 && duration < 10000 && network && !network->isApMode()) {
-                network->startApMode(AP_SSID, AP_PASS); 
-            }
+            unsigned long dur = millis() - buttonPressStart;
+            if (dur > 3000 && dur < 10000 && !network->isApMode()) network->startApMode(AP_SSID, AP_PASS);
             buttonPressStart = 0;
         }
     }
@@ -303,112 +270,80 @@ void checkHardwareButton() {
 
 void generateDeviceId() {
     uint64_t mac = ESP.getEfuseMac();
-    snprintf(uniqueDeviceId, sizeof(uniqueDeviceId), "esp32_%04X%08X", 
-             (uint16_t)(mac >> 32), (uint32_t)mac);
-    LOGF("[SYSTEM] Generated Device ID: %s\n", uniqueDeviceId);
+    snprintf(uniqueDeviceId, sizeof(uniqueDeviceId), "esp32_%04X%08X", (uint16_t)(mac >> 32), (uint32_t)mac);
 }
 
 void setup() {
     Serial.begin(115200);
-    delay(1000); 
-    LOG("\n--- SYSTEM BOOT (ESP32-C3) ---");
-    LOGF("Firmware Version: %s\n", FW_VERSION);
-    
-    setenv("TZ", "EET-2EEST,M3.5.0/3,M10.5.0/4", 1);
-    tzset();
-    
+    setenv("TZ", "EET-2EEST,M3.5.0/3,M10.5.0/4", 1); tzset();
     generateDeviceId();
 
-    LOG("Init I2C...");
     Wire.begin(I2C_SDA, I2C_SCL);
-    
-    LOG("Init DHT & OLED...");
     dht.begin();
     u8g2.begin();
     pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+    pinMode(HUMIDIFIER_PIN, OUTPUT);
+    digitalWrite(HUMIDIFIER_PIN, LOW);
     
-    // --- ПАМ'ЯТЬ ---
     preferences.begin("incubator_data", false);
-    
-    // 1. Відновлюємо позицію
     currentServoAngle = preferences.getInt("current", 0);
     targetServoAngle = preferences.getInt("target", 0);
     
-    // 2. Відновлюємо час
     unsigned long savedTime = preferences.getULong("saved_time", 0);
     if (savedTime > 0) {
-        struct timeval tv;
-        tv.tv_sec = savedTime;
-        tv.tv_usec = 0;
+        struct timeval tv = { .tv_sec = (time_t)savedTime, .tv_usec = 0 };
         settimeofday(&tv, NULL);
-        LOGF("[MEMORY] Restored Time: %lu\n", savedTime);
     }
-    
-    LOGF("Memory Read -> Current: %d, Target: %d\n", currentServoAngle, targetServoAngle);
 
-    // --- СЕРВО: Тільки налаштування, БЕЗ write() ---
-    LOG("Init Servo Config...");
     ESP32PWM::allocateTimer(0);
     incubatorServo.setPeriodHertz(50); 
     incubatorServo.attach(SERVO_PIN, 500, 2400);
 
-    // --- НАГРІВАЧ (МОСФЕТ) ---
-    LOG("Init Heater...");
-    // Використовуємо новий API для ESP32 Core 3.x
+    // Ініціалізація ШІМ для Нагрівача та Вентилятора
     ledcAttach(HEATER_PIN, 1000, 8); 
-    ledcWrite(HEATER_PIN, 255); // Вмикаємо на 100% (255)
-    LOG("Heater ON (Max Power)");
+    ledcAttach(FAN_PIN, 20000, 8); 
     
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_6x10_tf);
-    u8g2.drawStr(0, 10, "System Init...");
-    u8g2.drawStr(0, 20, "Heater: ON");
-    u8g2.drawStr(0, 30, "Mem: OK");
-    u8g2.sendBuffer();
-    delay(2000);
+    // Стартові значення
+    ledcWrite(HEATER_PIN, 0); 
+    ledcWrite(FAN_PIN, 0); // 127 = 50%
 
-    LOG("Configuring Network...");
     network = new KratisNetworkManager(SERVER_URL, uniqueDeviceId);
     network->setDeviceType(DEVICE_TYPE);
-    
-    // --- НОВЕ: Передаємо версію прошивки ---
     network->setFirmwareVersion(FW_VERSION);
-    
     network->setApCredentials(AP_SSID, AP_PASS); 
     network->setCommandCallback(onCommandReceived);
     network->begin();
+
+    // Ініціалізація нашої кастомної логіки QC і встановлення 5V
+    // Ініціюємо наш кастомний запит на 9В!
+    set9V_Custom();
+    Serial.println("QC 9V sequence completed!");
 }
 
 void loop() {
     checkHardwareButton();
     
-    // --- ЛОГІКА ЗБЕРЕЖЕННЯ ЧАСУ (КОЖНІ 10 ХВ) ---
-    if (millis() - lastTimeSave > 600000) { // 600 000 мс = 10 хв
+    if (millis() - lastTimeSave > 600000) {
         saveCurrentTime();
         lastTimeSave = millis();
     }
 
-    // --- ПРІОРИТЕТНА ЛОГІКА РУХУ (BLOCKING) ---
+    // --- РУХ СЕРВО (БЕЗ ПЕРЕЗАПИСУ ПАМ'ЯТІ В ПРОЦЕСІ) ---
     if (currentServoAngle != targetServoAngle) {
-        
-        // Рухаємось
         if (currentServoAngle < targetServoAngle) currentServoAngle++;
         else currentServoAngle--;
         
-        // Ось тут ми подаємо сигнал на сервопривід
         incubatorServo.write(currentServoAngle);
         updateDisplay();
         delay(stepDelay); 
         
-        // Зберігаємо позицію кожні 10 градусів
-        if (currentServoAngle % 10 == 0 || currentServoAngle == targetServoAngle) {
+        // Зберігаємо ТІЛЬКИ в кінці шляху
+        if (currentServoAngle == targetServoAngle) {
              preferences.putInt("current", currentServoAngle);
         }
-        
         return; 
     }
 
-    // --- ФОНОВІ ЗАДАЧІ ---
     if(network) network->handle();
 
     if (millis() - lastSensorRead > 2000) {
@@ -417,7 +352,6 @@ void loop() {
         float h = dht.readHumidity();
         if (!isnan(t)) temp = t;
         if (!isnan(h)) hum = h;
-        
         if(network) network->updateSensorData(temp, hum);
         updateDisplay();
     }
