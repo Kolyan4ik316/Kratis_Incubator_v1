@@ -4,6 +4,7 @@
 #include <DHT.h>
 #include <ESP32Servo.h> 
 #include "KratisNetworkManager.h" 
+#include "KratisQCManager.h"
 #include <time.h> 
 #include <Preferences.h>
 
@@ -60,6 +61,7 @@ U8G2_SSD1306_72X40_ER_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 // Об'єкти
 Servo incubatorServo;
 KratisNetworkManager* network = nullptr; 
+KratisQCManager qc(PIN_DP, PIN_DM);
 Preferences preferences; 
 
 unsigned long lastSensorRead = 0;
@@ -119,46 +121,6 @@ void performUpdate(String url) {
 }
 
 // --- ОБРОБКА КОМАНД (ВКЛЮЧАЮЧИ КАЛІБРУВАННЯ) ---
-void set9V_Custom() {
-  LOG("[QC] Starting 9V negotiation...");
-
-  // 0. Initial State (D+ and D- as inputs to let charger do its magic)
-  pinMode(PIN_DP, INPUT);
-  pinMode(PIN_DM, INPUT);
-  delay(1200); // Wait for initial charging sequence (BC1.2) to finish
-
-  // 1. Enter QC mode
-  // To enter QC mode from normal 5V, we need to hold D+ > 0.325V for 1.25s
-  pinMode(PIN_DP, OUTPUT);
-  digitalWrite(PIN_DP, HIGH); // Gives ~2.7V
-  pinMode(PIN_DM, OUTPUT);
-  digitalWrite(PIN_DM, LOW); // Gives 0V
-  
-  delay(1500); // 1.5s wait to ensure charger enters QC mode
-
-  // 2. Request 9V
-  // D+ = 3.3V, D- = 0.6V logic
-  // Our D+ is already HIGH (2.7V). We set D- HIGH (~1.03V)
-  digitalWrite(PIN_DM, HIGH);
-  LOG("[QC] 9V Requested (DP=2.7V, DM=1.03V)!");
-}
-
-void set5V_Custom() {
-  pinMode(PIN_DP, OUTPUT);
-  digitalWrite(PIN_DP, LOW);
-  pinMode(PIN_DM, OUTPUT);
-  digitalWrite(PIN_DM, LOW);
-  LOG("[QC] 5V Requested (DP=0V, DM=0V)");
-}
-
-void set12V_Custom() {
-  pinMode(PIN_DP, OUTPUT);
-  digitalWrite(PIN_DP, HIGH);
-  pinMode(PIN_DM, OUTPUT);
-  digitalWrite(PIN_DM, LOW);
-  LOG("[QC] 12V Requested (DP=High, DM=Low)");
-}
-
 void onCommandReceived(String cmd, String source) {
     lastCmd = cmd;
     LOGF("[LOG] Command Received: %s via %s\n", cmd.c_str(), source.c_str());
@@ -166,16 +128,13 @@ void onCommandReceived(String cmd, String source) {
     // OTA Update
     if (cmd.startsWith("UPDATE:")) {
         m_current = 5.0;
-        set5V_Custom();
+        qc.set5V();
         performUpdate(cmd.substring(7));
     }
     
     // --- КАЛІБРУВАННЯ НАГРІВАЧА (0-100%) ---
     else if (cmd.startsWith("CAL_HEAT:")) {
-        LOG("[QC] Calling set9V_Custom...");
-        
-        set9V_Custom();
-
+        qc.set9V();
         m_current = 9.0;
         LOG("[QC] TEST D+ High, D- Input.");
         int power = cmd.substring(9).toInt();
@@ -187,10 +146,8 @@ void onCommandReceived(String cmd, String source) {
 
     // --- КАЛІБРУВАННЯ ВЕНТИЛЯТОРА (0-100%) ---
     else if (cmd.startsWith("CAL_FAN:")) {
-        LOG("[QC] Attempting to set 5V...");
-        set5V_Custom(); // Повертаємо 5V стандарним методом
+        qc.set5V();
         m_current = 5.0;
-        LOG("[QC] 5V command sent.");
         int speed = cmd.substring(8).toInt();
         speed = constrain(speed, 0, 100);
         int pwm = map(speed, 0, 100, 0, 255);
@@ -210,10 +167,8 @@ void onCommandReceived(String cmd, String source) {
 
     // --- КЕРУВАННЯ ЗВОЛОЖУВАЧЕМ ---
     else if (cmd.startsWith("CAL_HUM:")) {
-        LOG("[QC] Attempting to set 12V...");
-        set12V_Custom(); // Повертаємо 12V стандарним методом
-        m_current = 12.0;
-        LOG("[QC] 12V command sent.");
+        qc.set12V(); // Тут 12V все одно скинеться до 9V, бо менеджер знає про апаратне обмеження
+        m_current = 12.0; // або краще 9.0 для правдивості
         int state = cmd.substring(8).toInt();
         digitalWrite(HUMIDIFIER_PIN, state == 1 ? HIGH : LOW);
         LOGF("[CAL] Humidifier: %s\n", state == 1 ? "ON" : "OFF");
@@ -312,12 +267,13 @@ void setup() {
     network->setFirmwareVersion(FW_VERSION);
     network->setApCredentials(AP_SSID, AP_PASS); 
     network->setCommandCallback(onCommandReceived);
-    network->begin();
 
-    // Ініціалізація нашої кастомної логіки QC і встановлення 5V
-    // Ініціюємо наш кастомний запит на 9В!
-    set9V_Custom();
+    // Ініціалізація нашої кастомної логіки QC (робимо ДО запуску мережі та WiFi)
+    qc.begin();
+    qc.set9V();
     Serial.println("QC 9V sequence completed!");
+
+    network->begin();
 }
 
 void loop() {
