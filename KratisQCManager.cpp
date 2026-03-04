@@ -20,7 +20,7 @@ void KratisQCManager::begin() {
 }
 
 void KratisQCManager::performHandshake() {
-    if (_isInitialized) return; 
+    if (_isInitialized) return;
 
     QC_LOG("[QC_MGR] Performing QC Handshake sequence...");
 
@@ -40,22 +40,29 @@ void KratisQCManager::performHandshake() {
     QC_LOG("[QC_MGR] Handshake completed.");
 }
 
+void KratisQCManager::forceHandshake() {
+    QC_LOG("[QC_MGR] Forcing Handshake...");
+    _isInitialized = false; 
+    performHandshake();     
+    set9V();                
+}
+
 void KratisQCManager::set5V() {
     QC_LOG("[QC_MGR] Requesting 5V...");
+
     pinMode(_dpPin, OUTPUT);
     digitalWrite(_dpPin, LOW);
     pinMode(_dmPin, OUTPUT);
     digitalWrite(_dmPin, LOW);
 
     QC_LOG("[QC_MGR] 5V target set. QC mode reset.");
-    _isInitialized = false;
+    _isInitialized = false; 
 }
 
 void KratisQCManager::set9V() {
     QC_LOG("[QC_MGR] Requesting 9V...");
     if (!_isInitialized) performHandshake();
 
-    // 9V: D+ = 3.3V logic (2.7V), D- = 0.6V logic (1.03V)
     pinMode(_dpPin, OUTPUT);
     digitalWrite(_dpPin, HIGH);
     pinMode(_dmPin, OUTPUT);

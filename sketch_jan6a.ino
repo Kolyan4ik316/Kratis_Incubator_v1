@@ -134,23 +134,23 @@ void onCommandReceived(String cmd, String source) {
     
     // --- КАЛІБРУВАННЯ НАГРІВАЧА (0-100%) ---
     else if (cmd.startsWith("CAL_HEAT:")) {
-        qc.set9V();
+        qc.forceHandshake(); // Завжди робимо рукостискання при зміні на 9V
         m_current = 9.0;
-        LOG("[QC] TEST D+ High, D- Input.");
         int power = cmd.substring(9).toInt();
         power = constrain(power, 0, 100);
-        int pwm = map(power, 0, 100, 0, 254);
+        //int pwm = map(power, 0, 100, 0, 254);
+        int pwm = map(power, 0, 100, 0, 130);
         ledcWrite(HEATER_PIN, pwm);
         LOGF("[CAL] Heater: %d%% (PWM: %d)\n", power, pwm);
     }
 
     // --- КАЛІБРУВАННЯ ВЕНТИЛЯТОРА (0-100%) ---
     else if (cmd.startsWith("CAL_FAN:")) {
-        qc.set5V();
-        m_current = 5.0;
+        qc.set9V();
+        m_current = 9.0;
         int speed = cmd.substring(8).toInt();
         speed = constrain(speed, 0, 100);
-        int pwm = map(speed, 0, 100, 0, 255);
+        int pwm = map(speed, 0, 100, 0, 143);
         ledcWrite(FAN_PIN, pwm);
         LOGF("[CAL] Fan: %d%% (PWM: %d)\n", speed, pwm);
     }
@@ -158,6 +158,7 @@ void onCommandReceived(String cmd, String source) {
     // --- КАЛІБРУВАННЯ СЕРВО (0-180) ---
     else if (cmd.startsWith("CAL_SERVO:") || cmd.startsWith("SERVO:")) {
         saveCurrentTime();
+        qc.set5V();
         int offset = cmd.startsWith("CAL_SERVO:") ? 10 : 6;
         int angle = cmd.substring(offset).toInt();
         targetServoAngle = constrain(angle, 0, 180);
@@ -167,8 +168,8 @@ void onCommandReceived(String cmd, String source) {
 
     // --- КЕРУВАННЯ ЗВОЛОЖУВАЧЕМ ---
     else if (cmd.startsWith("CAL_HUM:")) {
-        qc.set12V(); // Тут 12V все одно скинеться до 9V, бо менеджер знає про апаратне обмеження
-        m_current = 12.0; // або краще 9.0 для правдивості
+        qc.set5V();
+        m_current = 5.0;
         int state = cmd.substring(8).toInt();
         digitalWrite(HUMIDIFIER_PIN, state == 1 ? HIGH : LOW);
         LOGF("[CAL] Humidifier: %s\n", state == 1 ? "ON" : "OFF");
