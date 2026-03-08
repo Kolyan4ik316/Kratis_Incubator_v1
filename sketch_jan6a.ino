@@ -10,7 +10,6 @@
 #include <HTTPUpdate.h>
 #include <WiFiClientSecure.h>
 
-// --- DEBUG ---
 #define DEBUG 1
 #if DEBUG
   #define LOG(x) Serial.println("[LOG] " + String(x))
@@ -20,7 +19,6 @@
   #define LOGF(...)
 #endif
 
-// --- ІІЯ ---
 const char* SERVER_URL   = "https://kratis-p2p-server.onrender.com";
 const char* DEVICE_TYPE  = "incubator_v1";
 #define FW_VERSION "1.0.1"
@@ -29,7 +27,6 @@ char uniqueDeviceId[32];
 const char* AP_SSID = "Kratis-Incubator-01";
 const char* AP_PASS = "12345678";
 
-// --- І ---
 #define I2C_SDA         5
 #define I2C_SCL         6
 #define BOOT_BUTTON_PIN 9
@@ -42,16 +39,14 @@ const char* AP_PASS = "12345678";
 #define PIN_DP          10
 #define PIN_DM          1
 
-// --- СТ  ---
-// VOLT_5 = павербанк/USB (5V), ліміти ШІ: нагрівач 254, вентилятор 255
-// VOLT_9 = режим мережі через QC (9V), ліміти: нагрівач 127, вентилятор 95
+
 enum VoltageState { VOLT_5, VOLT_9 };
 VoltageState voltageState = VOLT_5;
 
 inline int heaterMaxPWM() { return voltageState == VOLT_9 ? 127 : 254; }
 inline int fanMaxPWM()    { return voltageState == VOLT_9 ?  95 : 255; }
 
-// --- 'ЄТ ---
+
 DHT dht(DHTPIN, DHTTYPE);
 U8G2_SSD1306_72X40_ER_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 Servo incubatorServo;
@@ -59,7 +54,7 @@ KratisNetworkManager* network = nullptr;
 KratisQCManager qc(PIN_DP, PIN_DM);
 Preferences preferences;
 
-// --- СТ ---
+
 float temp = 0.0;
 float hum  = 0.0;
 float m_current = 5.0;
@@ -68,15 +63,9 @@ String lastCmd = "Start";
 bool humidifierOn      = false;
 bool humidifierPending = false;
 
-// Сирий ШІМ-дюті (0-255) — основа для перерахунку при зміні напруги
-// Формула збереження амперів: D_new = D_old * V_old / V_new, обмежений max
 int currentHeaterDuty = 0;
 int currentFanDuty    = 0;
 
-// Масштабує дюті зберігаючи той самий % від максимуму поточної напруги.
-// D_new = D_old * maxNew / maxOld  — викликати ДО зміни voltageState.
-// enableGridMode (5V->9V): scaleAndApplyDuties(254,127, 255,95)
-// disableGridMode(9V->5V): scaleAndApplyDuties(127,254,  95,255)
 void scaleAndApplyDuties(int hMaxOld, int hMaxNew, int fMaxOld, int fMaxNew) {
     int newHeater = constrain((int)((long)currentHeaterDuty * hMaxNew / hMaxOld), 0, hMaxNew);
     int newFan    = constrain((int)((long)currentFanDuty    * fMaxNew / fMaxOld), 0, fMaxNew);
@@ -93,25 +82,17 @@ unsigned long lastSensorRead  = 0;
 unsigned long buttonPressStart = 0;
 unsigned long lastTimeSave    = 0;
 
-// --- С ---
 int currentServoAngle = 0;
 int targetServoAngle  = 0;
 const int stepDelay = 60;
 
-// ============================================================
-//  ІЯ 
-// ============================================================
 
 void enableGridMode() {
     LOG("[POWER] Switching to GRID MODE (9V)...");
-    // 1. Cut-off — зупиняємо все перед перемиканням
     ledcWrite(HEATER_PIN, 0);
     ledcWrite(FAN_PIN, 0);
-    // 2. QC хендшейк (всередині затримки 1500+1500ms) + перемикання на 9V
     qc.forceHandshake();
-    // 3. Очікуємо стабілізації напруги
     delay(500);
-    // 4. Тепер актуальна напруга 9V — масштабуємо duties під нові ліміти і вмикаємо
     scaleAndApplyDuties(254, 127, 255, 95);
     voltageState = VOLT_9;
     m_current = 9.0;
@@ -121,14 +102,10 @@ void enableGridMode() {
 
 void disableGridMode() {
     LOG("[POWER] Switching to BATTERY MODE (5V)...");
-    // 1. Cut-off — зупиняємо все перед перемиканням
     ledcWrite(HEATER_PIN, 0);
     ledcWrite(FAN_PIN, 0);
-    // 2. Скидаємо QC на 5V
     qc.set5V();
-    // 3. Очікуємо стабілізації напруги (QC реагує за ~200ms)
     delay(500);
-    // 4. Тепер актуальна напруга 5V — масштабуємо duties під нові ліміти і вмикаємо
     scaleAndApplyDuties(127, 254, 95, 255);
     voltageState = VOLT_5;
     m_current = 5.0;
@@ -136,9 +113,6 @@ void disableGridMode() {
     LOG("[POWER] Battery ON (5V)");
 }
 
-// ============================================================
-//  С
-// ============================================================
 
 String getFormattedTime() {
     struct tm timeinfo;
@@ -157,9 +131,6 @@ void saveCurrentTime() {
     }
 }
 
-// ============================================================
-//  OTA
-// ============================================================
 
 void update_started()  { LOG("[OTA] Update STARTED"); }
 void update_finished() { LOG("[OTA] Update FINISHED"); }
@@ -180,21 +151,13 @@ void performUpdate(String url) {
     if (ret == HTTP_UPDATE_OK) { delay(3000); ESP.restart(); }
 }
 
-// ============================================================
-//  
-// ============================================================
-
 void onCommandReceived(String cmd, String source) {
     lastCmd = cmd;
     LOGF("[CMD] %s via %s\n", cmd.c_str(), source.c_str());
 
-    // OTA
     if (cmd.startsWith("UPDATE:")) {
         performUpdate(cmd.substring(7));
     }
-
-    // SET_POWER_MODE:grid    -> 9V, зберігається в Preferences
-    // SET_POWER_MODE:battery -> 5V, видаляється з Preferences
     else if (cmd.startsWith("SET_POWER_MODE:")) {
         String mode = cmd.substring(15);
         if (mode == "grid") {
@@ -204,7 +167,6 @@ void onCommandReceived(String cmd, String source) {
         }
     }
 
-    // CAL_HEAT:0-100 — відсотки від поточного максимуму (залежить від режиму)
     else if (cmd.startsWith("CAL_HEAT:")) {
         int pct           = constrain(cmd.substring(9).toInt(), 0, 100);
         currentHeaterDuty = map(pct, 0, 100, 0, heaterMaxPWM());
@@ -213,7 +175,6 @@ void onCommandReceived(String cmd, String source) {
              pct, currentHeaterDuty, heaterMaxPWM(), voltageState == VOLT_9 ? "9" : "5");
     }
 
-    // CAL_FAN:0-100
     else if (cmd.startsWith("CAL_FAN:")) {
         int pct        = constrain(cmd.substring(8).toInt(), 0, 100);
         currentFanDuty = map(pct, 0, 100, 0, fanMaxPWM());
@@ -221,9 +182,6 @@ void onCommandReceived(String cmd, String source) {
         LOGF("[CAL] Fan: %d%% -> duty %d (max %d @ %sV)\n",
              pct, currentFanDuty, fanMaxPWM(), voltageState == VOLT_9 ? "9" : "5");
     }
-
-    // CAL_HUM:1 -> увімкнути зволожувач (тільки 5V!)
-    // CAL_HUM:0 -> вимкнути, повернутись на 9V якщо grid mode
     else if (cmd.startsWith("CAL_HUM:")) {
         int state = cmd.substring(8).toInt();
         if (state == 1) {
@@ -249,7 +207,6 @@ void onCommandReceived(String cmd, String source) {
         }
     }
 
-    // SERVO
     else if (cmd.startsWith("CAL_SERVO:") || cmd.startsWith("SERVO:")) {
         saveCurrentTime();
         int offset = cmd.startsWith("CAL_SERVO:") ? 10 : 6;
@@ -259,7 +216,6 @@ void onCommandReceived(String cmd, String source) {
         preferences.putInt("target", targetServoAngle);
     }
 
-    // SYNC_TIME
     else if (cmd.startsWith("SYNC_TIME:")) {
         unsigned long epoch = strtoul(cmd.substring(10).c_str(), NULL, 10);
         if (epoch > 1600000000) {
@@ -270,9 +226,6 @@ void onCommandReceived(String cmd, String source) {
     }
 }
 
-// ============================================================
-//  С
-// ============================================================
 
 void updateDisplay() {
     u8g2.clearBuffer();
@@ -294,9 +247,6 @@ void updateDisplay() {
     u8g2.sendBuffer();
 }
 
-// ============================================================
-//  
-// ============================================================
 
 void checkHardwareButton() {
     if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
@@ -316,9 +266,6 @@ void checkHardwareButton() {
     }
 }
 
-// ============================================================
-//  SETUP
-// ============================================================
 
 void generateDeviceId() {
     uint64_t mac = ESP.getEfuseMac();
@@ -357,19 +304,14 @@ void setup() {
     ledcAttach(FAN_PIN,    20000, 8);
     ledcWrite(HEATER_PIN, 0);
     ledcWrite(FAN_PIN,    0);
-
-    // QC: лише ініціалізація пінів.  затримок — мережа стартує першою!
     qc.begin();
 
-    // ережа стартує Ш і 
     network = new KratisNetworkManager(SERVER_URL, uniqueDeviceId);
     network->setDeviceType(DEVICE_TYPE);
     network->setFirmwareVersion(FW_VERSION);
     network->setApCredentials(AP_SSID, AP_PASS);
     network->setCommandCallback(onCommandReceived);
     network->begin();
-
-    // ісля запуску мережі: відновлюємо збережений режим живлення
     if (preferences.getBool("grid_mode", false)) {
         LOG("[SETUP] Restoring saved GRID MODE (9V)...");
         enableGridMode();
@@ -378,9 +320,6 @@ void setup() {
     }
 }
 
-// ============================================================
-//  LOOP
-// ============================================================
 
 void loop() {
     checkHardwareButton();
@@ -390,14 +329,12 @@ void loop() {
         lastTimeSave = millis();
     }
 
-    // воложувач pending: напруга вже 5V — вмикаємо
     if (humidifierPending && voltageState == VOLT_5) {
         humidifierPending = false;
         digitalWrite(HUMIDIFIER_PIN, HIGH);
         LOG("[HUM] ON (voltage settled to 5V)");
     }
 
-    // ух серво
     if (currentServoAngle != targetServoAngle) {
         if (currentServoAngle < targetServoAngle) currentServoAngle++;
         else                                      currentServoAngle--;

@@ -29,10 +29,10 @@ void KratisQCManager::performHandshake() {
     delay(1500);
 
     pinMode(_dpPin, OUTPUT);
-    digitalWrite(_dpPin, HIGH); // D+ ~2.7V
+    digitalWrite(_dpPin, HIGH); 
 
     pinMode(_dmPin, OUTPUT);
-    digitalWrite(_dmPin, LOW);  // D- ~0V
+    digitalWrite(_dmPin, LOW);  
 
     delay(1500);
     
