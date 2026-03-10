@@ -404,7 +404,7 @@ void onCommandReceived(String cmd, String source) {
         if (!pidEnabled) {
             ledcWrite(HEATER_PIN, 0);
             currentHeaterDuty = 0;
-            // Якщо необхідно також вимкнути вентилятор: ledcWrite(FAN_PIN, 0);
+            // При вимкненні PID залишаємо вентилятор крутитись (якщо його не вимкнули вручну CAL_FAN)
             LOG("[PID] Disabled manually. Heater off.");
         } else {
             LOG("[PID] Enabled manually.");
@@ -667,12 +667,17 @@ void computePID() {
     if (dutyCycle > maxOut) dutyCycle = maxOut;
     else if (dutyCycle < 0) dutyCycle = 0;
 
-    // Застосовуємо потужність
+    // Застосовуємо потужність нагрівача
     currentHeaterDuty = dutyCycle;
     applyHeaterPower();
     
-    LOGF("[PID] Err: %.2f | P: %.1f, I: %.1f, D: %.1f | OUT: %d/%d\n", 
-         error, P, I, D, currentHeaterDuty, (int)maxOut);
+    // В автоматичному режимі (PID) вентилятор має крутитись на максимум 
+    // в залежності від поточного режиму напруги
+    currentFanDuty = fanMaxPWM();
+    ledcWrite(FAN_PIN, currentFanDuty);
+    
+    LOGF("[PID] Err: %.2f | P: %.1f, I: %.1f, D: %.1f | OUT: %d/%d (Fan: %d)\n", 
+         error, P, I, D, currentHeaterDuty, (int)maxOut, currentFanDuty);
 }
 
 void computeAutoHumidity() {
