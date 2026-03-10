@@ -74,9 +74,14 @@ const int stepDelay = 60;
 
 enum VoltageState { VOLT_5, VOLT_9 };
 VoltageState voltageState = VOLT_5;
+static int max_9v_heater = 165;
+static int max_5v_heater = 254;
 
-int heaterMaxPWM() { return voltageState == VOLT_9 ? 127 : 254; }
-int fanMaxPWM()    { return voltageState == VOLT_9 ?  95 : 255; }
+static int max_9v_fan = 110;
+static int max_5v_fan = 255;
+
+int heaterMaxPWM() { return voltageState == VOLT_9 ? max_9v_heater : max_5v_heater; }
+int fanMaxPWM()    { return voltageState == VOLT_9 ?  max_9v_fan : max_5v_fan; }
 
 float m_current = 5.0;
 
@@ -86,6 +91,7 @@ bool humidifierPending = false;
 int currentHeaterDuty = 0;
 int currentFanDuty    = 0;
 
+static bool grid_mode_hum = false;
 
 void scaleAndApplyDuties(int hMaxOld, int hMaxNew, int fMaxOld, int fMaxNew) {
     int newHeater = constrain((int)((long)currentHeaterDuty * hMaxNew / hMaxOld), 0, hMaxNew);
@@ -109,7 +115,7 @@ void enableGridMode() {
     // 3. Очікуємо стабілізації напруги
     delay(500);
     // 4. Тепер актуальна напруга 9V — масштабуємо duties під нові ліміти і вмикаємо
-    scaleAndApplyDuties(254, 127, 255, 95);
+    scaleAndApplyDuties(max_5v_heater, max_9v_heater, max_5v_fan, max_9v_fan);
     voltageState = VOLT_9;
     m_current = 9.0;
     preferences.putBool("grid_mode", true);
@@ -126,7 +132,7 @@ void disableGridMode() {
     // 3. Очікуємо стабілізації напруги (QC реагує за ~200ms)
     delay(500);
     // 4. Тепер актуальна напруга 5V — масштабуємо duties під нові ліміти і вмикаємо
-    scaleAndApplyDuties(127, 254, 95, 255);
+    scaleAndApplyDuties(max_9v_heater, max_5v_heater, max_9v_fan, max_5v_fan);
     voltageState = VOLT_5;
     m_current = 5.0;
     preferences.putBool("grid_mode", false);
@@ -290,8 +296,8 @@ void onCommandReceived(String cmd, String source) {
              pct, currentFanDuty, fanMaxPWM(), voltageState == VOLT_9 ? "9" : "5");
     }
      else if (cmd.startsWith("CAL_HUM:")) {
-        int state = cmd.substring(8).toInt();
-        if (state == 1) {
+        //int state = cmd.substring(8).toInt();
+        /*if (state == 1) {
             humidifierOn = true;
             if (voltageState == VOLT_9) {
                 humidifierPending = true;
@@ -311,6 +317,34 @@ void onCommandReceived(String cmd, String source) {
             if (preferences.getBool("grid_mode", false)) {
                 enableGridMode();
             }
+        }*/
+        int state = cmd.substring(8).toInt();
+        if (state == 1)
+        {
+            if(!humidifierOn)
+            {
+                if(preferences.getBool("grid_mode", false))
+                {
+                    grid_mode_hum = true;
+                    disableGridMode();
+                }
+                humidifierOn = true;
+                digitalWrite(HUMIDIFIER_PIN, HIGH);
+                LOG("[HUM] ON");
+            }
+        }
+        else
+        {
+            humidifierOn = false;
+            digitalWrite(HUMIDIFIER_PIN, LOW);
+            LOG("[HUM] OFF");
+            
+            if(grid_mode_hum)
+            {
+                grid_mode_hum = false;
+                enableGridMode();
+            }
+            
         }
     }
     // --- ЛОГІКА СЕРВО ---
@@ -467,12 +501,14 @@ void setup() {
     incubatorServo.attach(SERVO_PIN, 500, 2400);
 
     // --- НАГРІВАЧ (МОСФЕТ) ---
-    LOG("Init Heater AND Fan...");
+    LOG("Init Heater, HUM AND Fan...");
     ledcAttach(HEATER_PIN, 1000, 8);
     ledcAttach(FAN_PIN, 20000, 8);
     ledcWrite(HEATER_PIN, 0);
     ledcWrite(FAN_PIN, 0);
-    LOG("Initialized Heater AND Fan!!!");
+    pinMode(HUMIDIFIER_PIN, OUTPUT);
+    digitalWrite(HUMIDIFIER_PIN, LOW);
+    LOG("Initialized Heater, HUM AND Fan!!!");
 
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x10_tf);
@@ -545,8 +581,11 @@ void loop() {
         lastSensorRead = millis();
         float t = dht.readTemperature();
         float h = dht.readHumidity();
-        if (!isnan(t)) temp = t;
-        if (!isnan(h)) hum = h;
+        if (!isnan(t)) 
+            temp = t;
+
+        if (!isnan(h)) 
+            hum = h;
         
         if(network) network->updateSensorData(temp, hum);
         updateDisplay();
