@@ -1,4 +1,4 @@
-#include <Arduino.h>
+﻿#include <Arduino.h>
 #include <U8g2lib.h>
 #include <Wire.h>
 #include <DHT.h>
@@ -92,6 +92,19 @@ int currentHeaterDuty = 0;
 int currentFanDuty    = 0;
 
 static bool grid_mode_hum = false;
+
+// --- PID РЕГУЛЯТОР ТЕМПЕРАТУРИ ---
+bool pidEnabled = false;        // Увімкнути/вимкнути авторегулювання
+float targetTemperature = 37.7; // Цільова температура для інкубації
+
+// Коефіцієнти (потребуватимуть налаштування на реальному залізі)
+float Kp = 50.0;  // Пропорційний
+float Ki = 0.5;   // Інтегральний (дуже малий для інерційних систем)
+float Kd = 10.0;  // Диференціальний
+
+float integralSum = 0.0;
+float lastError = 0.0;
+unsigned long lastPidTime = 0;
 
 void scaleAndApplyDuties(int hMaxOld, int hMaxNew, int fMaxOld, int fMaxNew) {
     int newHeater = constrain((int)((long)currentHeaterDuty * hMaxNew / hMaxOld), 0, hMaxNew);
@@ -347,6 +360,33 @@ void onCommandReceived(String cmd, String source) {
             
         }
     }
+    // --- НАЛАШТУВАННЯ PID ---
+    else if (cmd.startsWith("PID_EN:")) {
+        int state = cmd.substring(7).toInt();
+        pidEnabled = (state == 1);
+        preferences.putBool("pid_enabled", pidEnabled);
+        
+        // Якщо виключили PID, скидаємо нагрівач і вентилятор (або залишаємо як є - краще вимкнути, щоб не перегрілось)
+        if (!pidEnabled) {
+            ledcWrite(HEATER_PIN, 0);
+            currentHeaterDuty = 0;
+            // Якщо необхідно також вимкнути вентилятор: ledcWrite(FAN_PIN, 0);
+            LOG("[PID] Disabled manually. Heater off.");
+        } else {
+            LOG("[PID] Enabled manually.");
+            lastPidTime = millis(); // Скидання таймера PID
+        }
+    }
+    else if (cmd.startsWith("PID_TEMP:")) {
+        float newTemp = cmd.substring(9).toFloat();
+        if (newTemp >= 20.0 && newTemp <= 45.0) { // Обмеження безпечної температури
+            targetTemperature = newTemp;
+            preferences.putFloat("target_temp", targetTemperature);
+            LOGF("[PID] Target Temp changed to: %.1f\n", targetTemperature);
+        } else {
+            LOGF("[PID] Invalid temp: %.1f (Safe range 20-45)\n", newTemp);
+        }
+    }
     // --- ЛОГІКА СЕРВО ---
     else if (cmd.startsWith("SERVO:")) {
         // 1. Зберігаємо час ПЕРЕД початком руху (вимога)
@@ -492,7 +532,12 @@ void setup() {
         LOGF("[MEMORY] Restored Time: %lu\n", savedTime);
     }
     
+    // 3. Відновлюємо налаштування PID
+    pidEnabled = preferences.getBool("pid_enabled", false); // За замовчуванням вимкнено (або true, як захочете)
+    targetTemperature = preferences.getFloat("target_temp", 37.7);
+    
     LOGF("Memory Read -> Current: %d, Target: %d\n", currentServoAngle, targetServoAngle);
+    LOGF("Memory Read -> PID Enabled: %d, Target Temp: %.1f\n", pidEnabled, targetTemperature);
 
     // --- СЕРВО: Тільки налаштування, БЕЗ write() ---
     LOG("Init Servo Config...");
@@ -537,6 +582,54 @@ void setup() {
     } else {
         LOG("[SETUP] BATTERY MODE (5V). Ready.");
     }
+}
+
+void computePID() {
+    if (!pidEnabled) return;
+
+    unsigned long now = millis();
+    float dt = (now - lastPidTime) / 1000.0; // Час в секундах (приблизно 2 сек)
+    if (dt <= 0.0) return;
+    lastPidTime = now;
+
+    float error = targetTemperature - temp;
+    
+    // 1. Пропорційна складова
+    float P = Kp * error;
+
+    // 2. Інтегральна складова з обмеженням (Anti-Windup)
+    // Накопичуємо інтеграл тільки якщо ми близько до цілі (наприклад в межах +-2 градусів)
+    if (abs(error) < 2.0) {
+        integralSum += error * dt;
+    } else {
+        integralSum = 0; // Скидаємо, якщо ми далеко, щоб уникнути перегріву
+    }
+    float I = Ki * integralSum;
+
+    // Обмеження інтегральної суми
+    float maxOut = heaterMaxPWM(); // Ваша поточна максимальна потужність (5V або 9V)
+    if (I > maxOut) I = maxOut;
+    else if (I < 0) I = 0;
+
+    // 3. Диференціальна складова
+    float derivative = (error - lastError) / dt;
+    float D = Kd * derivative;
+    lastError = error;
+
+    // 4. Загальний результат
+    float output = P + I + D;
+
+    // 5. Ограничення результату в межах PWM
+    int dutyCycle = (int)output;
+    if (dutyCycle > maxOut) dutyCycle = maxOut;
+    else if (dutyCycle < 0) dutyCycle = 0;
+
+    // Застосовуємо потужність
+    currentHeaterDuty = dutyCycle;
+    ledcWrite(HEATER_PIN, currentHeaterDuty);
+    
+    LOGF("[PID] Err: %.2f | P: %.1f, I: %.1f, D: %.1f | OUT: %d/%d\n", 
+         error, P, I, D, currentHeaterDuty, (int)maxOut);
 }
 
 void loop() {
@@ -586,8 +679,13 @@ void loop() {
 
         if (!isnan(h)) 
             hum = h;
-        
+
+        // Виклик PID після кожного успішного отримання температури
+        if (lastPidTime == 0) lastPidTime = millis(); // ініціалізація
+        computePID(); 
+
         if(network) network->updateSensorData(temp, hum);
         updateDisplay();
     }
 }
+
