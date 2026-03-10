@@ -97,6 +97,12 @@ static bool grid_mode_hum = false;
 bool pidEnabled = false;        // Увімкнути/вимкнути авторегулювання
 float targetTemperature = 37.7; // Цільова температура для інкубації
 
+// --- АВТОМАТИЧНА ВОЛОГІСТЬ ---
+bool autoHumEnabled = false;    // Увімкнути/вимкнути авторегулювання вологості
+float targetHumidity = 50.0;    // Цільова вологість
+int autoHumState = 0;           // 0: IDLE, 1: ON, 2: COOLDOWN
+unsigned long autoHumTimer = 0;
+
 // Коефіцієнти (потребуватимуть налаштування на реальному залізі)
 float Kp = 50.0;  // Пропорційний
 float Ki = 0.5;   // Інтегральний (дуже малий для інерційних систем)
@@ -118,7 +124,7 @@ void scaleAndApplyDuties(int hMaxOld, int hMaxNew, int fMaxOld, int fMaxNew) {
     ledcWrite(FAN_PIN,    currentFanDuty);
 }
 
-void enableGridMode() {
+void enableGridMode(bool ignore_save = false) {
     LOG("[POWER] Switching to GRID MODE (9V)...");
     // 1. Cut-off — зупиняємо все перед перемиканням
     ledcWrite(HEATER_PIN, 0);
@@ -131,11 +137,12 @@ void enableGridMode() {
     scaleAndApplyDuties(max_5v_heater, max_9v_heater, max_5v_fan, max_9v_fan);
     voltageState = VOLT_9;
     m_current = 9.0;
-    preferences.putBool("grid_mode", true);
+    if(!ignore_save)
+        preferences.putBool("grid_mode", true);
     LOG("[POWER] Grid ON (9V)");
 }
 
-void disableGridMode() {
+void disableGridMode(bool ignore_save = false) {
     LOG("[POWER] Switching to BATTERY MODE (5V)...");
     // 1. Cut-off — зупиняємо все перед перемиканням
     ledcWrite(HEATER_PIN, 0);
@@ -148,7 +155,8 @@ void disableGridMode() {
     scaleAndApplyDuties(max_9v_heater, max_5v_heater, max_9v_fan, max_5v_fan);
     voltageState = VOLT_5;
     m_current = 5.0;
-    preferences.putBool("grid_mode", false);
+    if(!ignore_save)
+        preferences.putBool("grid_mode", false);
     LOG("[POWER] Battery ON (5V)");
 }
 
@@ -331,6 +339,13 @@ void onCommandReceived(String cmd, String source) {
                 enableGridMode();
             }
         }*/
+        // Вимикаємо авто-режим, якщо користувач натиснув ручне керування
+        if (autoHumEnabled) {
+            autoHumEnabled = false;
+            preferences.putBool("hum_enabled", false);
+            LOG("[AUTO_HUM] Disabled due to manual override.");
+        }
+        
         int state = cmd.substring(8).toInt();
         if (state == 1)
         {
@@ -339,7 +354,7 @@ void onCommandReceived(String cmd, String source) {
                 if(preferences.getBool("grid_mode", false))
                 {
                     grid_mode_hum = true;
-                    disableGridMode();
+                    disableGridMode(true);
                 }
                 humidifierOn = true;
                 digitalWrite(HUMIDIFIER_PIN, HIGH);
@@ -355,7 +370,7 @@ void onCommandReceived(String cmd, String source) {
             if(grid_mode_hum)
             {
                 grid_mode_hum = false;
-                enableGridMode();
+                enableGridMode(true);
             }
             
         }
@@ -385,6 +400,22 @@ void onCommandReceived(String cmd, String source) {
             LOGF("[PID] Target Temp changed to: %.1f\n", targetTemperature);
         } else {
             LOGF("[PID] Invalid temp: %.1f (Safe range 20-45)\n", newTemp);
+        }
+    }
+    // --- НАЛАШТУВАННЯ АВТО ВОЛОГОСТІ ---
+    else if (cmd.startsWith("HUM_EN:")) {
+        int state = cmd.substring(7).toInt();
+        autoHumEnabled = (state == 1);
+        preferences.putBool("hum_enabled", autoHumEnabled);
+        
+        LOGF("[AUTO_HUM] Mode set to: %d\n", autoHumEnabled);
+    }
+    else if (cmd.startsWith("HUM_TARGET:")) {
+        float newHum = cmd.substring(11).toFloat();
+        if (newHum >= 10.0 && newHum <= 95.0) { // Межі
+            targetHumidity = newHum;
+            preferences.putFloat("target_hum", targetHumidity);
+            LOGF("[AUTO_HUM] Target Humidity changed to: %.1f%%\n", targetHumidity);
         }
     }
     // --- ЛОГІКА СЕРВО ---
@@ -532,12 +563,16 @@ void setup() {
         LOGF("[MEMORY] Restored Time: %lu\n", savedTime);
     }
     
-    // 3. Відновлюємо налаштування PID
+    // 3. Відновлюємо налаштування PID та вологості
     pidEnabled = preferences.getBool("pid_enabled", false); // За замовчуванням вимкнено (або true, як захочете)
     targetTemperature = preferences.getFloat("target_temp", 37.7);
     
+    autoHumEnabled = preferences.getBool("hum_enabled", false);
+    targetHumidity = preferences.getFloat("target_hum", 50.0);
+    
     LOGF("Memory Read -> Current: %d, Target: %d\n", currentServoAngle, targetServoAngle);
     LOGF("Memory Read -> PID Enabled: %d, Target Temp: %.1f\n", pidEnabled, targetTemperature);
+    LOGF("Memory Read -> Hum Enabled: %d, Target Hum: %.1f\n", autoHumEnabled, targetHumidity);
 
     // --- СЕРВО: Тільки налаштування, БЕЗ write() ---
     LOG("Init Servo Config...");
@@ -632,6 +667,88 @@ void computePID() {
          error, P, I, D, currentHeaterDuty, (int)maxOut);
 }
 
+void computeAutoHumidity() {
+    if (!autoHumEnabled) {
+        // Якщо вимкнули авто-режим, а воно лишилося висіти в якомусь стані
+        if (autoHumState != 0) {
+            digitalWrite(HUMIDIFIER_PIN, LOW);
+            autoHumState = 0;
+            humidifierOn = false;
+            // Повертаємо 9V, якщо були там
+            if (grid_mode_hum) {
+                grid_mode_hum = false;
+                enableGridMode();
+            }
+        }
+        return;
+    }
+
+    switch (autoHumState) {
+        case 0: // IDLE - чекаємо поки впаде вологість
+            if (hum > 0 && hum < targetHumidity) {
+                // Вмикаємо алгоритм накачування вологості
+                // Перевіряємо чи треба збити напругу до 5V
+                if (voltageState == VOLT_9 || preferences.getBool("grid_mode", false)) {
+                    grid_mode_hum = true;
+                    disableGridMode(true);
+                }
+                
+                digitalWrite(HUMIDIFIER_PIN, HIGH);
+                humidifierOn = true;
+                autoHumState = 1; // Перехід до стану ON
+                autoHumTimer = millis();
+                LOGF("[AUTO_HUM] Started. Target: %.1f, Cur: %.1f\n", targetHumidity, hum);
+            }
+            break;
+
+        case 1: // ON - працює до 17 секунд або до досягнення цілі +7%
+            if (hum >= (targetHumidity + 7.0)) {
+                // Досягли цілі достроково
+                digitalWrite(HUMIDIFIER_PIN, LOW);
+                humidifierOn = false;
+                autoHumState = 0; 
+                // Повертаємо 9V, якщо вимикали
+                if (grid_mode_hum) {
+                    grid_mode_hum = false;
+                    enableGridMode(true);
+                }
+                LOG("[AUTO_HUM] Reached Target + 7% early. Stopping.");
+            } 
+            else if (millis() - autoHumTimer >= 17000) {
+                // Відпрацював 17 секунд, треба відпочивати
+                digitalWrite(HUMIDIFIER_PIN, LOW);
+                humidifierOn = false;
+                autoHumState = 2; // Перехід до COOLDOWN
+                autoHumTimer = millis();
+                LOG("[AUTO_HUM] 17s max reached. Cooldown 20s started.");
+            }
+            break;
+
+        case 2: // COOLDOWN - відпочиває мінімум 20 секунд (котушка остигає)
+            // При цьому він залишається в режимі 5V, ми не стрибаємо туди-назад
+            if (millis() - autoHumTimer >= 20000) {
+                // Перевіряємо, чи набралась вологість за час відпочинку
+                if (hum >= (targetHumidity + 7.0)) {
+                    autoHumState = 0; // Повертаємось в IDLE
+                    // Тепер можна повернути напругу
+                    if (grid_mode_hum) {
+                        grid_mode_hum = false;
+                        enableGridMode();
+                    }
+                    LOG("[AUTO_HUM] Done. Condition met after cooldown.");
+                } else {
+                    // Вологості все ще не вистачає, робимо наступний цикл
+                    digitalWrite(HUMIDIFIER_PIN, HIGH);
+                    humidifierOn = true;
+                    autoHumState = 1; // Перехід до ON
+                    autoHumTimer = millis();
+                    LOG("[AUTO_HUM] Cooldown done. Resuming pump.");
+                }
+            }
+            break;
+    }
+}
+
 void loop() {
     checkHardwareButton();
 
@@ -669,6 +786,9 @@ void loop() {
 
     // --- ФОНОВІ ЗАДАЧІ ---
     if(network) network->handle();
+
+    // Обслуговування авто-вологості
+    computeAutoHumidity();
 
     if (millis() - lastSensorRead > 2000) {
         lastSensorRead = millis();
