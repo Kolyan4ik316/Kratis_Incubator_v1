@@ -80,7 +80,13 @@ static int max_5v_heater = 254;
 static int max_9v_fan = 110;
 static int max_5v_fan = 255;
 
-int heaterMaxPWM() { return voltageState == VOLT_9 ? max_9v_heater : max_5v_heater; }
+int heaterMaxPWM() { 
+    int max_val = voltageState == VOLT_9 ? max_9v_heater : max_5v_heater; 
+    // Зменшуємо максимальну відкриваємість мосфета нагрівача на 25%, 
+    // коли працює зволожувач (щоб залишити струм для котушки)
+    if (humidifierOn) max_val = max_val * 0.75;
+    return max_val;
+}
 int fanMaxPWM()    { return voltageState == VOLT_9 ?  max_9v_fan : max_5v_fan; }
 
 float m_current = 5.0;
@@ -92,6 +98,16 @@ int currentHeaterDuty = 0;
 int currentFanDuty    = 0;
 
 static bool grid_mode_hum = false;
+
+// --- ЗАСТОСУВАННЯ ПОТУЖНОСТІ НАГРІВАЧА ---
+void applyHeaterPower() {
+    int max_allowed = heaterMaxPWM(); // Враховує пониження на 25% коли працює зволожувач
+    int actual = currentHeaterDuty;
+    if (actual > max_allowed) {
+        actual = max_allowed; // фізично обрізаємо до безпечної межі
+    }
+    ledcWrite(HEATER_PIN, actual);
+}
 
 // --- PID РЕГУЛЯТОР ТЕМПЕРАТУРИ ---
 bool pidEnabled = false;        // Увімкнути/вимкнути авторегулювання
@@ -120,7 +136,7 @@ void scaleAndApplyDuties(int hMaxOld, int hMaxNew, int fMaxOld, int fMaxNew) {
          currentFanDuty,    fMaxNew, fMaxOld, newFan);
     currentHeaterDuty = newHeater;
     currentFanDuty    = newFan;
-    ledcWrite(HEATER_PIN, currentHeaterDuty);
+    applyHeaterPower();
     ledcWrite(FAN_PIN,    currentFanDuty);
 }
 
@@ -305,7 +321,7 @@ void onCommandReceived(String cmd, String source) {
     else if (cmd.startsWith("CAL_HEAT:")) {
         int pct = constrain(cmd.substring(9).toInt(), 0, 100);
         currentHeaterDuty = map(pct, 0, 100, 0, heaterMaxPWM());
-        ledcWrite(HEATER_PIN, currentHeaterDuty);
+        applyHeaterPower();
         LOGF("[CAL] Heater: %d%% -> duty %d (max %d @ %sV)\n",
              pct, currentHeaterDuty, heaterMaxPWM(), voltageState == VOLT_9 ? "9" : "5");
     }
@@ -358,21 +374,24 @@ void onCommandReceived(String cmd, String source) {
                 }
                 humidifierOn = true;
                 digitalWrite(HUMIDIFIER_PIN, HIGH);
+                applyHeaterPower(); // Одразу знижуємо максимум нагрівача
                 LOG("[HUM] ON");
             }
         }
         else
         {
-            humidifierOn = false;
-            digitalWrite(HUMIDIFIER_PIN, LOW);
-            LOG("[HUM] OFF");
-            
-            if(grid_mode_hum)
-            {
-                grid_mode_hum = false;
-                enableGridMode(true);
+            if (humidifierOn) {
+                humidifierOn = false;
+                digitalWrite(HUMIDIFIER_PIN, LOW);
+                applyHeaterPower(); // Повертаємо нормальний максимум нагрівача
+                LOG("[HUM] OFF");
+                
+                if(grid_mode_hum)
+                {
+                    grid_mode_hum = false;
+                    enableGridMode(true);
+                }
             }
-            
         }
     }
     // --- НАЛАШТУВАННЯ PID ---
@@ -661,7 +680,7 @@ void computePID() {
 
     // Застосовуємо потужність
     currentHeaterDuty = dutyCycle;
-    ledcWrite(HEATER_PIN, currentHeaterDuty);
+    applyHeaterPower();
     
     LOGF("[PID] Err: %.2f | P: %.1f, I: %.1f, D: %.1f | OUT: %d/%d\n", 
          error, P, I, D, currentHeaterDuty, (int)maxOut);
@@ -673,11 +692,14 @@ void computeAutoHumidity() {
         if (autoHumState != 0) {
             digitalWrite(HUMIDIFIER_PIN, LOW);
             autoHumState = 0;
-            humidifierOn = false;
+            if (humidifierOn) {
+                humidifierOn = false;
+                applyHeaterPower();
+            }
             // Повертаємо 9V, якщо були там
             if (grid_mode_hum) {
                 grid_mode_hum = false;
-                enableGridMode();
+                enableGridMode(true);
             }
         }
         return;
@@ -695,6 +717,7 @@ void computeAutoHumidity() {
                 
                 digitalWrite(HUMIDIFIER_PIN, HIGH);
                 humidifierOn = true;
+                applyHeaterPower(); // Застосовуємо ліміт -25%
                 autoHumState = 1; // Перехід до стану ON
                 autoHumTimer = millis();
                 LOGF("[AUTO_HUM] Started. Target: %.1f, Cur: %.1f\n", targetHumidity, hum);
@@ -706,6 +729,7 @@ void computeAutoHumidity() {
                 // Досягли цілі достроково
                 digitalWrite(HUMIDIFIER_PIN, LOW);
                 humidifierOn = false;
+                applyHeaterPower(); // Повертаємо 100%
                 autoHumState = 0; 
                 // Повертаємо 9V, якщо вимикали
                 if (grid_mode_hum) {
@@ -718,6 +742,7 @@ void computeAutoHumidity() {
                 // Відпрацював 17 секунд, треба відпочивати
                 digitalWrite(HUMIDIFIER_PIN, LOW);
                 humidifierOn = false;
+                applyHeaterPower(); // Повертаємо 100%
                 autoHumState = 2; // Перехід до COOLDOWN
                 autoHumTimer = millis();
                 LOG("[AUTO_HUM] 17s max reached. Cooldown 20s started.");
@@ -733,13 +758,14 @@ void computeAutoHumidity() {
                     // Тепер можна повернути напругу
                     if (grid_mode_hum) {
                         grid_mode_hum = false;
-                        enableGridMode();
+                        enableGridMode(true);
                     }
                     LOG("[AUTO_HUM] Done. Condition met after cooldown.");
                 } else {
                     // Вологості все ще не вистачає, робимо наступний цикл
                     digitalWrite(HUMIDIFIER_PIN, HIGH);
                     humidifierOn = true;
+                    applyHeaterPower(); // Знову ліміт -25%
                     autoHumState = 1; // Перехід до ON
                     autoHumTimer = millis();
                     LOG("[AUTO_HUM] Cooldown done. Resuming pump.");
