@@ -475,37 +475,26 @@ void updateDisplay() {
     if (network->isApMode()) {
         u8g2.drawStr(0, 9, "SETUP MODE");
         u8g2.drawStr(0, 19, AP_SSID); 
-        u8g2.drawStr(0, 29, "192.168.4.1");
+        //u8g2.drawStr(0, 29, "192.168.4.1");
     } else {
-        // Рядок 1: ЧАС
-        String header = "";
-        
+        // Рядок 1: Статус WiFi + Кут серви
         if (!network->isConnected()) {
-             header = "!NO WIFI!"; 
+             u8g2.drawStr(0, 9, "WiFi: OFF"); 
         } else {
-             String timeStr = getFormattedTime();
-             if (timeStr == "--:--") header = "Loading...";
-             else header = timeStr;
+             u8g2.drawStr(0, 9, "WiFi: ON ");
         }
+        u8g2.setCursor(50, 9);
+        u8g2.print("S"); u8g2.print(currentServoAngle);
+        if(currentServoAngle != targetServoAngle) u8g2.print(">");
         
-        u8g2.setCursor(0, 9);
-        u8g2.print(header);
-        
-        // Рядок 2: Температура + Версія (маленька буква v)
+        // Рядок 2: Температура і Вологість
         u8g2.setCursor(0, 19); 
         u8g2.print("T:"); u8g2.print(temp, 1);
-        u8g2.setCursor(50, 19);
-        u8g2.print("v"); u8g2.print(FW_VERSION); // Покажемо версію
-        
-        // Рядок 3: Вологість + Кут серви
-        u8g2.setCursor(0, 29); 
+        u8g2.setCursor(40, 19);
         u8g2.print("H:"); u8g2.print(hum, 0); 
-        u8g2.setCursor(35, 29);
-        u8g2.print("S:"); u8g2.print(currentServoAngle);
-        if(currentServoAngle != targetServoAngle) u8g2.print(">"); 
         
-        // Рядок 4: Команда
-        u8g2.setCursor(0, 39);
+        // Рядок 3: Остання команда
+        u8g2.setCursor(0, 32);
         String shortCmd = lastCmd.length() > 10 ? lastCmd.substring(0, 10) : lastCmd;
         u8g2.print(">" + shortCmd);
     }
