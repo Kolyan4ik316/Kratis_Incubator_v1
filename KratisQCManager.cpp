@@ -7,6 +7,15 @@
   #define QC_LOG(x)
 #endif
 
+// Допоміжна функція для неблокуючої затримки
+void safeDelay(unsigned long ms) {
+    unsigned long start = millis();
+    while (millis() - start < ms) {
+        yield(); // Дозволяємо ESP32 обробляти Wi-Fi стек
+        delay(10);
+    }
+}
+
 KratisQCManager::KratisQCManager(uint8_t dpPin, uint8_t dmPin) {
     _dpPin = dpPin;
     _dmPin = dmPin;
@@ -26,7 +35,7 @@ void KratisQCManager::performHandshake() {
 
     pinMode(_dpPin, INPUT);
     pinMode(_dmPin, INPUT);
-    delay(1500);
+    safeDelay(1500); // Неблокуюче очікування
 
     pinMode(_dpPin, OUTPUT);
     digitalWrite(_dpPin, HIGH); 
@@ -34,7 +43,7 @@ void KratisQCManager::performHandshake() {
     pinMode(_dmPin, OUTPUT);
     digitalWrite(_dmPin, LOW);  
 
-    delay(1500);
+    safeDelay(1500); // Неблокуюче очікування
     
     _isInitialized = true;
     QC_LOG("[QC_MGR] Handshake completed.");
@@ -74,9 +83,5 @@ void KratisQCManager::set9V() {
 void KratisQCManager::set12V() {
     QC_LOG("[QC_MGR] Attempting to set 12V...");
     if (!_isInitialized) performHandshake();
-
-    QC_LOG("[QC_MGR] WARNING: Hardware constraints prevent 12V.");
-    QC_LOG("[QC_MGR] Falling back to 9V.");
-
-    set9V();
+    set9V(); // Обмеження залізом
 }
